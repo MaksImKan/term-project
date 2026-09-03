@@ -1,0 +1,385 @@
+openapi: 3.0.3
+
+info:
+  title: Marketplace API
+  version: 1.0.0
+  description: >-
+    Мінімальний контракт маркетплейсу для ДЗ-09: два ресурси (`/products` та
+    `/orders`), cursor-пагінація на спискових операціях, обовʼязковий заголовок
+    `Idempotency-Key` на створенні замовлення та єдиний контракт помилок
+    `application/problem+json` (RFC 9457) на всіх 4xx/5xx.
+  license:
+    name: MIT
+    url: https://opensource.org/licenses/MIT
+
+# Авторизації в API поки свідомо немає — порожній масив закриває
+# redocly-правило security-defined без вигаданих схем безпеки.
+security: []
+
+servers:
+  - url: http://localhost:3000
+    description: Локальний dev-сервер (Variant Б — express-openapi-validator)
+
+tags:
+  - name: products
+    description: Каталог товарів.
+  - name: orders
+    description: Замовлення покупців.
+
+paths:
+  /products:
+    get:
+      tags: [products]
+      operationId: listProducts
+      summary: Список товарів (cursor-пагінація)
+      description: >-
+        Повертає сторінку товарів. Гроші — у цілих копійках (`price_cents`),
+        без float.
+      parameters:
+        - name: limit
+          in: query
+          required: false
+          description: Максимальна кількість елементів на сторінці (1..100, типово 20).
+          schema:
+            type: integer
+            minimum: 1
+            maximum: 100
+            default: 20
+        - name: cursor
+          in: query
+          required: false
+          description: >-
+            Непрозорий (opaque) токен наступної сторінки. Клієнт НЕ парсить і не
+            конструює його — лише передає назад значення `next_cursor` з
+            попередньої відповіді. Відсутній cursor означає першу сторінку.
+          schema:
+            type: string
+      responses:
+        '200':
+          description: Сторінка товарів.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ProductPage'
+        '400':
+          $ref: '#/components/responses/BadRequest'
+        default:
+          $ref: '#/components/responses/InternalError'
+
+  /products/{productId}:
+    get:
+      tags: [products]
+      operationId: getProductById
+      summary: Отримати товар за id
+      parameters:
+        - name: productId
+          in: path
+          required: true
+          description: Ідентифікатор товару.
+          schema:
+            type: string
+      responses:
+        '200':
+          description: Товар.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Product'
+        '404':
+          $ref: '#/components/responses/NotFound'
+        default:
+          $ref: '#/components/responses/InternalError'
+
+  /orders:
+    get:
+      tags: [orders]
+      operationId: listOrders
+      summary: Список замовлень (cursor-пагінація)
+      parameters:
+        - name: limit
+          in: query
+          required: false
+          description: Максимальна кількість елементів на сторінці (1..100, типово 20).
+          schema:
+            type: integer
+            minimum: 1
+            maximum: 100
+            default: 20
+        - name: cursor
+          in: query
+          required: false
+          description: >-
+            Непрозорий (opaque) токен наступної сторінки. Клієнт НЕ парсить і не
+            конструює його — лише передає назад значення `next_cursor` з
+            попередньої відповіді. Відсутній cursor означає першу сторінку.
+          schema:
+            type: string
+      responses:
+        '200':
+          description: Сторінка замовлень.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/OrderPage'
+        '400':
+          $ref: '#/components/responses/BadRequest'
+        default:
+          $ref: '#/components/responses/InternalError'
+    post:
+      tags: [orders]
+      operationId: createOrder
+      summary: Створити замовлення (ідемпотентно)
+      description: >-
+        Створює замовлення з позицій кошика. Сума рахується сервером у цілих
+        копійках (`total_cents`).
+      parameters:
+        - name: Idempotency-Key
+          in: header
+          required: true
+          description: >-
+            Ключ ідемпотентності запиту. Той самий ключ разом із тим самим тілом
+            запиту повертає ту саму відповідь (той самий 201 і те саме
+            замовлення), не створюючи дубль. Той самий ключ з іншим тілом —
+            конфлікт (422). Стандарту на цей заголовок немає (IETF-draft
+            прострочений), тож семантику задає цей опис.
+          schema:
+            type: string
+            minLength: 1
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/CreateOrderRequest'
+      responses:
+        '201':
+          description: Замовлення створено (або відтворено з того самого ключа).
+          headers:
+            Idempotency-Replay:
+              description: >-
+                `true`, якщо відповідь відтворено з попереднього запиту з тим
+                самим `Idempotency-Key` (тіло не оброблялося повторно).
+              schema:
+                type: boolean
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Order'
+        '400':
+          $ref: '#/components/responses/BadRequest'
+        '404':
+          $ref: '#/components/responses/NotFound'
+        '422':
+          $ref: '#/components/responses/UnprocessableEntity'
+        default:
+          $ref: '#/components/responses/InternalError'
+
+  /orders/{orderId}:
+    get:
+      tags: [orders]
+      operationId: getOrderById
+      summary: Отримати замовлення за id
+      parameters:
+        - name: orderId
+          in: path
+          required: true
+          description: Ідентифікатор замовлення.
+          schema:
+            type: string
+      responses:
+        '200':
+          description: Замовлення.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Order'
+        '404':
+          $ref: '#/components/responses/NotFound'
+        default:
+          $ref: '#/components/responses/InternalError'
+
+components:
+  responses:
+    BadRequest:
+      description: Некоректний запит (валідація параметрів, заголовків або тіла).
+      content:
+        application/problem+json:
+          schema:
+            $ref: '#/components/schemas/Problem'
+    NotFound:
+      description: Ресурс не знайдено.
+      content:
+        application/problem+json:
+          schema:
+            $ref: '#/components/schemas/Problem'
+    UnprocessableEntity:
+      description: >-
+        Запит синтаксично коректний, але не може бути оброблений (напр.,
+        той самий Idempotency-Key з іншим тілом).
+      content:
+        application/problem+json:
+          schema:
+            $ref: '#/components/schemas/Problem'
+    InternalError:
+      description: Внутрішня помилка (зокрема провал валідації відповіді).
+      content:
+        application/problem+json:
+          schema:
+            $ref: '#/components/schemas/Problem'
+
+  schemas:
+    Problem:
+      type: object
+      description: Контракт помилки за RFC 9457 (application/problem+json).
+      required:
+        - type
+        - title
+        - status
+        - detail
+        - instance
+      properties:
+        type:
+          type: string
+          format: uri-reference
+          description: URI типу помилки.
+          example: about:blank
+        title:
+          type: string
+          description: Коротка людиночитна назва типу помилки.
+          example: Bad Request
+        status:
+          type: integer
+          description: HTTP-код відповіді.
+          example: 400
+        detail:
+          type: string
+          description: Що саме пішло не так у цьому конкретному випадку.
+          example: request/headers must have required property 'idempotency-key'
+        instance:
+          type: string
+          format: uri-reference
+          description: Посилання на конкретний випадок помилки.
+          example: /orders
+
+    Money:
+      type: integer
+      format: int64
+      minimum: 0
+      description: Сума в цілих копійках (integer), без float.
+      example: 2600
+
+    Product:
+      type: object
+      required:
+        - id
+        - name
+        - price_cents
+        - currency
+      properties:
+        id:
+          type: string
+          example: p_1
+        name:
+          type: string
+          example: Mechanical Keyboard
+        price_cents:
+          $ref: '#/components/schemas/Money'
+        currency:
+          type: string
+          description: Валюта у форматі ISO 4217.
+          example: UAH
+
+    ProductPage:
+      type: object
+      required:
+        - items
+        - next_cursor
+      properties:
+        items:
+          type: array
+          items:
+            $ref: '#/components/schemas/Product'
+        next_cursor:
+          type: string
+          nullable: true
+          description: >-
+            Непрозорий токен наступної сторінки. `null` — сторінок більше немає.
+
+    OrderItem:
+      type: object
+      required:
+        - product_id
+        - quantity
+      properties:
+        product_id:
+          type: string
+          example: p_1
+        quantity:
+          type: integer
+          minimum: 1
+          example: 2
+
+    CreateOrderRequest:
+      type: object
+      required:
+        - items
+      properties:
+        items:
+          type: array
+          minItems: 1
+          description: Позиції кошика (щонайменше одна).
+          items:
+            $ref: '#/components/schemas/OrderItem'
+        currency:
+          type: string
+          description: Валюта замовлення (ISO 4217). Типово UAH.
+          example: UAH
+      additionalProperties: false
+
+    Order:
+      type: object
+      required:
+        - id
+        - status
+        - items
+        - total_cents
+        - currency
+        - created_at
+      properties:
+        id:
+          type: string
+          example: o_1
+        status:
+          type: string
+          enum: [created, paid, cancelled]
+          example: created
+        items:
+          type: array
+          minItems: 1
+          items:
+            $ref: '#/components/schemas/OrderItem'
+        total_cents:
+          $ref: '#/components/schemas/Money'
+        currency:
+          type: string
+          example: UAH
+        created_at:
+          type: string
+          format: date-time
+          example: '2026-08-29T10:00:00.000Z'
+
+    OrderPage:
+      type: object
+      required:
+        - items
+        - next_cursor
+      properties:
+        items:
+          type: array
+          items:
+            $ref: '#/components/schemas/Order'
+        next_cursor:
+          type: string
+          nullable: true
+          description: >-
+            Непрозорий токен наступної сторінки. `null` — сторінок більше немає.
