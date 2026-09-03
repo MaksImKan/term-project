@@ -20,8 +20,10 @@ export function decodeCursor(cursor?: string): number {
   }
 }
 
-export function paginate<T>(collection: T[], query: ListQuery): Page<T> {
-  const limit = query.limit === undefined ? 20 : Number(query.limit);
+// defaultLimit приходить із типізованого конфіга (DEFAULT_PAGE_LIMIT),
+// а не з магічної константи в коді.
+export function paginate<T>(collection: T[], query: ListQuery, defaultLimit: number): Page<T> {
+  const limit = query.limit === undefined ? defaultLimit : Number(query.limit);
   const offset = decodeCursor(query.cursor);
   const items = collection.slice(offset, offset + limit);
   const hasMore = offset + limit < collection.length;

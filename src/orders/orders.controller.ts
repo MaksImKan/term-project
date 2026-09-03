@@ -29,14 +29,14 @@ export class OrdersController {
 
   @Post()
   @HttpCode(201)
-  create(
+  async create(
     // Наявність заголовка вже гарантував валідатор (required у спеці).
     // Node віддає імена заголовків у lowercase, тож 'idempotency-key'.
     @Headers('idempotency-key') idempotencyKey: string,
     @Body() body: CreateOrderBody,
     @Res({ passthrough: true }) res: Response,
   ) {
-    const { order, replay } = this.orders.create(idempotencyKey, body);
+    const { order, replay } = await this.orders.create(idempotencyKey, body);
     if (replay) res.setHeader('Idempotency-Replay', 'true');
     return order; // Nest -> res.json(order) -> валідатор перевірить відповідь
   }

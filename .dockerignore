@@ -1,0 +1,24 @@
+# Те, що не має потрапити в build context (а отже — і в шари образу).
+
+# Секрети — найважливіші рядки цього файла.
+.env
+.env.*
+!.env.example
+secrets
+
+# Артефакти та службове
+node_modules
+dist
+.git
+.gitignore
+*.log
+*.tsbuildinfo
+.DS_Store
+spec.json
+
+# Інфраструктура, не потрібна всередині образу
+Dockerfile
+.dockerignore
+docker-compose.yml
+rotate.sh
+db

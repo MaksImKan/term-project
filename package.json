@@ -2,28 +2,38 @@
   "name": "term-project-hw-09",
   "version": "1.0.0",
   "private": true,
-  "description": "ДЗ-09 — OpenAPI-спека + runtime-валідація на кордоні (Variant Б, NestJS + express-openapi-validator)",
+  "description": "Курсовий проєкт Marketplace API (NestJS): OpenAPI-контракт, zod-конфіг із fail-fast та ротація пароля БД без рестарту",
   "scripts": {
     "build": "nest build",
-    "start": "nest start",
+    "start": "npm run build && node dist/main.js",
+    "start:dev": "nest start --watch",
     "start:prod": "node dist/main.js",
+    "check:env": "node scripts/check-env-example.mjs",
+    "secrets:init": "mkdir -p secrets && [ -f secrets/db_password ] || printf '%s' 'dev_password_0' > secrets/db_password",
+    "db:up": "docker compose up -d",
+    "db:down": "docker compose down",
+    "rotate": "bash rotate.sh",
     "lint:spec": "redocly lint openapi/openapi.yaml",
     "bundle": "redocly bundle openapi/openapi.yaml -o spec.json"
   },
   "dependencies": {
     "@nestjs/common": "10.4.22",
+    "@nestjs/config": "3.3.0",
     "@nestjs/core": "10.4.22",
     "@nestjs/platform-express": "10.4.22",
     "express": "4.22.2",
     "express-openapi-validator": "5.6.2",
+    "pg": "8.16.3",
     "reflect-metadata": "0.2.2",
-    "rxjs": "7.8.2"
+    "rxjs": "7.8.2",
+    "zod": "3.25.76"
   },
   "devDependencies": {
     "@nestjs/cli": "10.4.9",
     "@redocly/cli": "2.46.0",
     "@types/express": "4.17.23",
     "@types/node": "22.15.3",
+    "@types/pg": "8.15.5",
     "typescript": "5.7.3"
   }
 }

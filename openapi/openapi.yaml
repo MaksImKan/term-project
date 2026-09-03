@@ -21,12 +21,32 @@ servers:
     description: Локальний dev-сервер (Variant Б — express-openapi-validator)
 
 tags:
+  - name: ops
+    description: Службові ендпоінти (health-check).
   - name: products
     description: Каталог товарів.
   - name: orders
     description: Замовлення покупців.
 
 paths:
+  /health:
+    get:
+      tags: [ops]
+      operationId: getHealth
+      summary: Стан сервісу та зʼєднання з БД
+      description: >-
+        `uptime_seconds` — час життя ПРОЦЕСУ. Після ротації пароля БД він має
+        зрости, а не обнулитися: це і є доказ того, що сервіс не перезапускався.
+      responses:
+        '200':
+          description: Стан сервісу.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Health'
+        default:
+          $ref: '#/components/responses/InternalError'
+
   /products:
     get:
       tags: [products]
@@ -260,6 +280,68 @@ components:
           format: uri-reference
           description: Посилання на конкретний випадок помилки.
           example: /orders
+
+    Health:
+      type: object
+      description: Знімок стану процесу та підключення до Postgres.
+      required:
+        - status
+        - env
+        - pid
+        - started_at
+        - uptime_seconds
+        - db
+        - pool
+      properties:
+        status:
+          type: string
+          enum: [ok, degraded]
+          description: '`ok` — БД відповідає; `degraded` — процес живий, але БД недоступна.'
+          example: ok
+        env:
+          type: string
+          enum: [development, test, production]
+          description: Значення NODE_ENV із провалідованого конфіга.
+          example: development
+        pid:
+          type: integer
+          description: PID процесу. Незмінний PID після ротації = рестарту не було.
+          example: 4242
+        started_at:
+          type: string
+          format: date-time
+          description: Момент старту процесу.
+          example: '2026-09-03T10:00:00.000Z'
+        uptime_seconds:
+          type: number
+          minimum: 0
+          description: Скільки секунд живе процес.
+          example: 42.117
+        db:
+          type: string
+          enum: [ok, down]
+          description: Результат SELECT 1 через пул зʼєднань.
+          example: ok
+        pool:
+          type: object
+          description: Лічильники пулу pg (після ротації зʼєднання пересоздаються).
+          required:
+            - total
+            - idle
+            - waiting
+          properties:
+            total:
+              type: integer
+              description: Усього клієнтів у пулі.
+              example: 1
+            idle:
+              type: integer
+              description: Вільних клієнтів.
+              example: 1
+            waiting:
+              type: integer
+              description: Запитів, що чекають на клієнта.
+              example: 0
 
     Money:
       type: integer
