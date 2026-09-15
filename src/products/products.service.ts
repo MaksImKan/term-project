@@ -6,9 +6,23 @@ import { DatabaseService } from '../db/database.service';
 import { Env } from '../config/env.schema';
 
 /**
- * Каталог живе у Postgres — саме цей шлях перевіряє критерій ротації:
- * після зміни пароля запит, що ходить у БД, має далі віддавати 200.
+ * Каталог живе у Postgres (db/schema.sql, таблиця products).
+ *
+ * Два місця, де схема БД і контракт API розходяться свідомо, тож мапінг стоїть
+ * тут, у SQL, і не протікає ані в OpenAPI-спеку, ані в модель:
+ *
+ *   price numeric(12,2) -> price_cents integer
+ *     У БД гроші — numeric: тип без втрати точності, без прив'язки до локалі
+ *     (money) і без двійкового округлення (float). Назовні openapi.yaml
+ *     обіцяє цілі копійки, тож множимо на 100 у запиті.
+ *
+ *   id bigint -> id string
+ *     Ключ у БД — bigint GENERATED ALWAYS AS IDENTITY (не serial). У спеці id
+ *     оголошений рядком, тож приводимо ::text.
  */
+const PRODUCT_COLUMNS =
+  'id::text AS id, name, (price * 100)::int AS price_cents, currency';
+
 @Injectable()
 export class ProductsService {
   constructor(
@@ -25,7 +39,10 @@ export class ProductsService {
 
     // limit + 1 — щоб дізнатися, чи є наступна сторінка, без окремого COUNT.
     const { rows } = await this.db.query<Product>(
-      'SELECT id, name, price_cents, currency FROM products ORDER BY id LIMIT $1 OFFSET $2',
+      // ORDER BY products.id, а не ORDER BY id: у SELECT є вихідна колонка з
+      // тим самим іменем (id::text AS id), і бездомне `id` Postgres зіставив би
+      // саме з нею — сортування поїхало б лексикографічно (1, 10, 100).
+      `SELECT ${PRODUCT_COLUMNS} FROM products ORDER BY products.id LIMIT $1 OFFSET $2`,
       [limit + 1, offset],
     );
 
@@ -44,8 +61,13 @@ export class ProductsService {
 
   // Для розрахунку суми замовлення.
   async findRaw(id: string): Promise<Product | undefined> {
+    // id у спеці — рядок, у БД — bigint. Нечислові id відсікаємо тут, щоб не
+    // отримати 500 від Postgres ("invalid input syntax for type bigint")
+    // там, де за контрактом має бути 404.
+    if (!/^[0-9]{1,18}$/.test(id)) return undefined;
+
     const { rows } = await this.db.query<Product>(
-      'SELECT id, name, price_cents, currency FROM products WHERE id = $1',
+      `SELECT ${PRODUCT_COLUMNS} FROM products WHERE id = $1::bigint`,
       [id],
     );
     return rows[0];

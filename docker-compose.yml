@@ -1,8 +1,22 @@
-# Локальний Postgres для розробки та для перевірки ротації пароля.
+# Локальний Postgres: стенд для розробки, для перевірки ротації пароля (ДЗ-11)
+# і для дата-шару (ДЗ-12).
 #
 # Пароль ролі береться з ./secrets/db_password (той самий файл, що читає
 # застосунок) — через docker secret, а не через environment: так пароль не
 # видно ані в `docker inspect`, ані в історії шарів.
+#
+# На свіжому клоні цього файла немає (secrets/* у .gitignore), тому команда
+# підняття стенда спершу копіює дев-значення з secrets/db_password.example:
+#
+#   [ -f secrets/db_password ] || cp secrets/db_password.example secrets/db_password \
+#     && docker compose up -d --wait
+#
+# Це дев-креденшели стенда, не секрет: вони потрібні грейдеру, щоб підняти базу
+# зі свіжого клону. Секрет застосунку (DB_URL і пароль у проді) живе у сховищі.
+#
+# Схема НЕ застосовується автоматично через docker-entrypoint-initdb.d: інакше
+# `psql -f db/schema.sql` на вже створених таблицях падав би з помилкою.
+# Порядок явний: db/schema.sql -> db/seed.sql -> db/indexes.sql (див. README).
 services:
   db:
     image: postgres:16-alpine
@@ -18,7 +32,6 @@ services:
       - "5432:5432"
     volumes:
       - pgdata:/var/lib/postgresql/data
-      - ./db/init.sql:/docker-entrypoint-initdb.d/init.sql:ro
     healthcheck:
       test: ["CMD-SHELL", "pg_isready -U marketplace -d marketplace"]
       interval: 5s

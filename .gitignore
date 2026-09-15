@@ -11,6 +11,8 @@ spec.json
 .env.*
 !.env.example
 
-# Файл-секрет із паролем БД. Створюється командою `npm run secrets:init`.
+# Файл-секрет із паролем БД. Створюється командою `npm run secrets:init`,
+# яка копіює secrets/db_password.example — єдиний файл секретів у git.
 secrets/*
 !secrets/.gitkeep
+!secrets/db_password.example
