@@ -3,10 +3,12 @@ import {
   NotFoundException,
   UnprocessableEntityException,
 } from '@nestjs/common';
+import { ConfigService } from '@nestjs/config';
 import { createHash } from 'crypto';
 import { CreateOrderBody, ListQuery, Order, Page } from '../models';
 import { paginate } from '../common/pagination';
 import { ProductsService } from '../products/products.service';
+import { Env } from '../config/env.schema';
 
 interface IdempotencyRecord {
   hash: string;
@@ -15,7 +17,10 @@ interface IdempotencyRecord {
 
 @Injectable()
 export class OrdersService {
-  constructor(private readonly products: ProductsService) {}
+  constructor(
+    private readonly products: ProductsService,
+    private readonly config: ConfigService<Env, true>,
+  ) {}
 
   private readonly orders: Order[] = [
     {
@@ -40,7 +45,7 @@ export class OrdersService {
   private readonly idempotency = new Map<string, IdempotencyRecord>();
 
   list(query: ListQuery): Page<Order> {
-    return paginate(this.orders, query);
+    return paginate(this.orders, query, this.config.get('DEFAULT_PAGE_LIMIT', { infer: true }));
   }
 
   findOne(id: string): Order {
@@ -50,7 +55,10 @@ export class OrdersService {
   }
 
   // Повертає замовлення + прапорець replay (для заголовка Idempotency-Replay).
-  create(key: string, body: CreateOrderBody): { order: Order; replay: boolean } {
+  async create(
+    key: string,
+    body: CreateOrderBody,
+  ): Promise<{ order: Order; replay: boolean }> {
     const hash = createHash('sha256').update(JSON.stringify(body)).digest('hex');
 
     const seen = this.idempotency.get(key);
@@ -65,7 +73,8 @@ export class OrdersService {
 
     let total = 0;
     for (const item of body.items) {
-      const product = this.products.findRaw(item.product_id);
+      // ціна береться з Postgres (ProductsService), а не з памʼяті процесу
+      const product = await this.products.findRaw(item.product_id);
       if (!product) throw new NotFoundException(`product not found: ${item.product_id}`);
       total += product.price_cents * item.quantity;
     }
@@ -75,7 +84,7 @@ export class OrdersService {
       status: 'created',
       items: body.items.map((i) => ({ product_id: i.product_id, quantity: i.quantity })),
       total_cents: total,
-      currency: body.currency ?? 'UAH',
+      currency: body.currency ?? this.config.get('DEFAULT_CURRENCY', { infer: true }),
       created_at: new Date().toISOString(),
     };
 
