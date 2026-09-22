@@ -10,17 +10,24 @@
     "start:prod": "node dist/main.js",
     "check:env": "node scripts/check-env-example.mjs",
     "secrets:init": "[ -f secrets/db_password ] || cp secrets/db_password.example secrets/db_password",
+    "migrate": "bash scripts/with-secrets.sh dev npx typeorm -d dist/data-source.js migration:run",
+    "migrate:show": "bash scripts/with-secrets.sh dev npx typeorm -d dist/data-source.js migration:show",
+    "migrate:revert": "bash scripts/with-secrets.sh dev npx typeorm -d dist/data-source.js migration:revert",
+    "migration:generate": "bash scripts/with-secrets.sh dev npx typeorm -d dist/data-source.js migration:generate",
+    "seed": "bash scripts/with-secrets.sh dev node dist/seed.js",
+    "demo:nplus1": "bash scripts/with-secrets.sh dev node dist/demo-nplus1.js",
+    "report": "bash scripts/with-secrets.sh dev node dist/report.js",
     "db:up": "npm run secrets:init && docker compose up -d --wait",
     "db:down": "docker compose down",
-    "rotate": "bash rotate.sh",
-    "lint:spec": "redocly lint openapi/openapi.yaml",
-    "bundle": "redocly bundle openapi/openapi.yaml -o spec.json",
     "db:reset": "docker compose down -v && cp secrets/db_password.example secrets/db_password && docker compose up -d --wait",
     "db:psql": "docker compose exec -T db psql -U marketplace -d marketplace",
     "db:schema": "docker compose exec -T db psql -U marketplace -d marketplace -v ON_ERROR_STOP=1 < db/schema.sql",
     "db:seed": "docker compose exec -T db psql -U marketplace -d marketplace -v ON_ERROR_STOP=1 < db/seed.sql",
     "db:indexes": "docker compose exec -T db psql -U marketplace -d marketplace -v ON_ERROR_STOP=1 < db/indexes.sql && docker compose exec -T db psql -U marketplace -d marketplace -c \"ANALYZE\"",
-    "db:explain": "bash db/explain.sh"
+    "db:explain": "bash db/explain.sh",
+    "rotate": "bash rotate.sh",
+    "lint:spec": "redocly lint openapi/openapi.yaml",
+    "bundle": "redocly bundle openapi/openapi.yaml -o spec.json"
   },
   "dependencies": {
     "@nestjs/common": "10.4.22",
@@ -32,6 +39,7 @@
     "pg": "8.16.3",
     "reflect-metadata": "0.2.2",
     "rxjs": "7.8.2",
+    "typeorm": "0.3.27",
     "zod": "3.25.76"
   },
   "devDependencies": {

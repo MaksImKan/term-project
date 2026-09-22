@@ -1,4 +1,4 @@
-SELECT id, status, total_amount, currency, created_at
+SELECT id, status, total_cents, currency, created_at
 FROM orders
 WHERE buyer_id = 7
   AND created_at >= now() - interval '90 days'
