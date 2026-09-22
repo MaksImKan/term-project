@@ -9,12 +9,18 @@
     "start:dev": "nest start --watch",
     "start:prod": "node dist/main.js",
     "check:env": "node scripts/check-env-example.mjs",
-    "secrets:init": "mkdir -p secrets && [ -f secrets/db_password ] || printf '%s' 'dev_password_0' > secrets/db_password",
-    "db:up": "docker compose up -d",
+    "secrets:init": "[ -f secrets/db_password ] || cp secrets/db_password.example secrets/db_password",
+    "db:up": "npm run secrets:init && docker compose up -d --wait",
     "db:down": "docker compose down",
     "rotate": "bash rotate.sh",
     "lint:spec": "redocly lint openapi/openapi.yaml",
-    "bundle": "redocly bundle openapi/openapi.yaml -o spec.json"
+    "bundle": "redocly bundle openapi/openapi.yaml -o spec.json",
+    "db:reset": "docker compose down -v && cp secrets/db_password.example secrets/db_password && docker compose up -d --wait",
+    "db:psql": "docker compose exec -T db psql -U marketplace -d marketplace",
+    "db:schema": "docker compose exec -T db psql -U marketplace -d marketplace -v ON_ERROR_STOP=1 < db/schema.sql",
+    "db:seed": "docker compose exec -T db psql -U marketplace -d marketplace -v ON_ERROR_STOP=1 < db/seed.sql",
+    "db:indexes": "docker compose exec -T db psql -U marketplace -d marketplace -v ON_ERROR_STOP=1 < db/indexes.sql && docker compose exec -T db psql -U marketplace -d marketplace -c \"ANALYZE\"",
+    "db:explain": "bash db/explain.sh"
   },
   "dependencies": {
     "@nestjs/common": "10.4.22",

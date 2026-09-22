@@ -1,0 +1,119 @@
+-- =============================================================================
+-- Marketplace API — схема дата-шару (ДЗ-12)
+--
+-- Застосовується на чисту базу однією командою:
+--   docker compose exec -T db psql -U marketplace -d marketplace -f /dev/stdin < db/schema.sql
+--
+-- Рішення за типами:
+--   * гроші        — numeric(12,2), НЕ float і НЕ money (втрата точності / локаль);
+--   * час          — timestamptz, НЕ timestamp (без зони «зараз» нічого не означає);
+--   * ключі        — bigint GENERATED ALWAYS AS IDENTITY, а не serial
+--                    (serial — це sequence + default збоку, з правами й ALTER-болем);
+--   * текст        — text, а не varchar(n)/char(n): обмеження довжини — це CHECK,
+--                    а не тип.
+--
+-- CHECK-и стоять там, де брехня в даних недопустима: ціна не може бути 0 або
+-- відʼємною, кількість у позиції замовлення — нульовою, оплачене замовлення не
+-- може не мати часу оплати.
+-- =============================================================================
+
+BEGIN;
+
+-- Порядок DROP-ів зворотний до порядку залежностей: schema.sql має
+-- застосовуватись і на чисту базу, і повторно (локальний цикл перевірки).
+DROP TABLE IF EXISTS order_items CASCADE;
+DROP TABLE IF EXISTS orders      CASCADE;
+DROP TABLE IF EXISTS products    CASCADE;
+DROP TABLE IF EXISTS users       CASCADE;
+
+-- -----------------------------------------------------------------------------
+-- users — і покупці, і продавці (одна роль може бути обома)
+-- -----------------------------------------------------------------------------
+CREATE TABLE users (
+  id          bigint      GENERATED ALWAYS AS IDENTITY PRIMARY KEY,
+  email       text        NOT NULL,
+  full_name   text        NOT NULL,
+  city        text        NOT NULL,
+  is_active   boolean     NOT NULL DEFAULT true,
+  created_at  timestamptz NOT NULL DEFAULT now(),
+
+  CONSTRAINT users_email_unique       UNIQUE (email),
+  CONSTRAINT users_email_shape        CHECK (position('@' IN email) > 1),
+  CONSTRAINT users_full_name_filled   CHECK (length(btrim(full_name)) > 0),
+  CONSTRAINT users_city_filled        CHECK (length(btrim(city)) > 0)
+);
+
+-- -----------------------------------------------------------------------------
+-- products — каталог. Таблиця, по якій іде повнотекстовий пошук (q4).
+-- -----------------------------------------------------------------------------
+CREATE TABLE products (
+  id            bigint        GENERATED ALWAYS AS IDENTITY PRIMARY KEY,
+  seller_id     bigint        NOT NULL REFERENCES users (id) ON DELETE RESTRICT,
+  name          text          NOT NULL,
+  description   text          NOT NULL,
+  price         numeric(12,2) NOT NULL,
+  currency      text          NOT NULL DEFAULT 'UAH',
+  stock         integer       NOT NULL DEFAULT 0,
+  is_published  boolean       NOT NULL DEFAULT true,
+  created_at    timestamptz   NOT NULL DEFAULT now(),
+
+  CONSTRAINT products_name_filled    CHECK (length(btrim(name)) > 0),
+  CONSTRAINT products_price_positive CHECK (price > 0),
+  CONSTRAINT products_currency_iso   CHECK (currency ~ '^[A-Z]{3}$'),
+  CONSTRAINT products_stock_natural  CHECK (stock >= 0)
+);
+
+-- Пошуковий вектор — ГЕНЕРОВАНА збережена колонка: Postgres сам перераховує її
+-- на кожному INSERT/UPDATE name або description, тож синхронізувати руками
+-- (тригером чи в коді застосунку) нічого не треба.
+--
+-- Конфігурація 'simple' — свідомо: словника української в Postgres із коробки
+-- немає (див. секцію «Морфологія» у db/OPTIMIZATIONS.md). 'simple' лише
+-- нормалізує регістр і розбиває на слова, без стемінгу.
+--
+-- Ціна цієї колонки — приблизно подвоєний розмір таблиці й помітно повільніша
+-- вставка; числа заміряні в db/OPTIMIZATIONS.md.
+ALTER TABLE products ADD COLUMN search_vector tsvector
+  GENERATED ALWAYS AS (to_tsvector('simple', name || ' ' || description)) STORED;
+
+-- -----------------------------------------------------------------------------
+-- orders — головна таблиця обсягу (≥100 000 рядків у seed)
+-- -----------------------------------------------------------------------------
+CREATE TABLE orders (
+  id            bigint        GENERATED ALWAYS AS IDENTITY PRIMARY KEY,
+  buyer_id      bigint        NOT NULL REFERENCES users (id) ON DELETE RESTRICT,
+  status        text          NOT NULL DEFAULT 'pending',
+  total_amount  numeric(12,2) NOT NULL DEFAULT 0,
+  currency      text          NOT NULL DEFAULT 'UAH',
+  created_at    timestamptz   NOT NULL DEFAULT now(),
+  paid_at       timestamptz,
+
+  CONSTRAINT orders_status_known     CHECK (status IN ('pending','paid','shipped','delivered','cancelled')),
+  CONSTRAINT orders_currency_iso     CHECK (currency ~ '^[A-Z]{3}$'),
+  CONSTRAINT orders_total_natural    CHECK (total_amount >= 0),
+  CONSTRAINT orders_paid_at_sane     CHECK (paid_at IS NULL OR paid_at >= created_at),
+  -- Оплачене/відправлене/доставлене замовлення зобовʼязане мати час оплати.
+  -- Скасоване могло бути оплаченим до скасування, тож для нього paid_at вільний.
+  CONSTRAINT orders_paid_has_paid_at CHECK (
+    status IN ('pending','cancelled') OR paid_at IS NOT NULL
+  )
+);
+
+-- -----------------------------------------------------------------------------
+-- order_items — позиції замовлення. unit_price зберігаємо копією: ціна товару
+-- у каталозі змінюється, а те, за скільки покупець купив, змінюватись не може.
+-- -----------------------------------------------------------------------------
+CREATE TABLE order_items (
+  id          bigint        GENERATED ALWAYS AS IDENTITY PRIMARY KEY,
+  order_id    bigint        NOT NULL REFERENCES orders (id)   ON DELETE CASCADE,
+  product_id  bigint        NOT NULL REFERENCES products (id) ON DELETE RESTRICT,
+  quantity    integer       NOT NULL,
+  unit_price  numeric(12,2) NOT NULL,
+
+  CONSTRAINT order_items_quantity_positive CHECK (quantity > 0),
+  CONSTRAINT order_items_price_positive    CHECK (unit_price > 0),
+  -- Один товар у замовленні — один рядок; повтор означає зміну quantity.
+  CONSTRAINT order_items_one_row_per_product UNIQUE (order_id, product_id)
+);
+
+COMMIT;

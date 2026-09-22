@@ -1,8 +1,9 @@
 # Marketplace API — курсовий проєкт
 
-NestJS + `express-openapi-validator` (ДЗ-09) та керована конфігурація з ротацією
-секретів (ДЗ-11). Розділ [Configuration](#configuration) — про змінні середовища,
-запуск і ротацію пароля БД без рестарту.
+NestJS + `express-openapi-validator` (ДЗ-09), керована конфігурація з ротацією
+секретів (ДЗ-11) і дата-шар на Postgres з індексами та повнотекстовим пошуком (ДЗ-12).
+Розділ [Configuration](#configuration) — про змінні середовища, запуск і ротацію пароля
+БД без рестарту; розділ [Дата-шар](#дата-шар-дз-12) — про схему, seed і `EXPLAIN`.
 
 ## Контракт на кордоні (ДЗ-09)
 
@@ -35,7 +36,13 @@ NestJS + `express-openapi-validator` (ДЗ-09) та керована конфі�
 | `.env.example`                  | Контракт змінних у git; реальний `.env` — у `.gitignore`       |
 | `secrets/db_password`           | Файл-секрет із паролем БД (у `.gitignore` і `.dockerignore`)   |
 | `rotate.sh`                     | Ротація пароля БД без рестарту сервісу                          |
-| `docker-compose.yml`, `db/init.sql` | Локальний Postgres + сіди каталогу                         |
+| `docker-compose.yml`            | Локальний Postgres (стенд для розробки, ротації та ДЗ-12)      |
+| `db/schema.sql`                 | Таблиці, констрейнти, генерована `tsvector`-колонка            |
+| `db/seed.sql`                   | Генерація даних (≥100 000 рядків) + `VACUUM (ANALYZE)`         |
+| `db/queries/q1..q4.sql`         | Реальні запити API — по одному statement на файл                |
+| `db/indexes.sql`                | Усі індекси оптимізації, включно з GIN під q4                   |
+| `db/explain.sh`                 | Прогін `EXPLAIN (ANALYZE, BUFFERS)` для q1..q4                  |
+| `db/OPTIMIZATIONS.md`           | 4 пари `EXPLAIN` до/після + секція «Морфологія»                 |
 | `Dockerfile`, `.dockerignore`   | Образ без секретів у шарах                                     |
 | `README.md`                     | Цей файл                                                       |
 
@@ -68,19 +75,28 @@ secrets/db_password ──▶ password: () => readFile() ──▶ pg.Pool ─�
 Джерело правди — `src/config/env.schema.ts`. Контракт у git — `.env.example`
 (реальний `.env` у `.gitignore`). Синхронність звіряє `npm run check:env`.
 
-| Змінна | Тип / значення | Обовʼязкова | Типово | Призначення |
-| --- | --- | --- | --- | --- |
-| `NODE_ENV` | `development` \| `test` \| `production` | ні | `development` | Режим роботи застосунку |
-| `PORT` | integer 1..65535 | ні | `3000` | HTTP-порт |
-| `LOG_LEVEL` | `debug` \| `info` \| `warn` \| `error` | ні | `info` | Рівень логування |
-| `DB_URL` | `postgres://<user>@<host>:<port>/<db>` | **так** | — | DSN Postgres **без пароля** |
-| `DB_PASSWORD_FILE` | шлях | ні | `./secrets/db_password` | Файл-секрет із паролем БД |
-| `DB_POOL_MAX` | integer 1..100 | ні | `10` | Максимум зʼєднань у пулі |
-| `DB_CONNECTION_TIMEOUT_MS` | integer 100..60000 | ні | `5000` | Таймаут отримання зʼєднання |
-| `DB_SSL` | `true` \| `false` | ні | `false` | TLS до Postgres |
-| `VALIDATE_RESPONSES` | `true` \| `false` | ні | `true` | Валідація відповідей проти OpenAPI |
-| `DEFAULT_CURRENCY` | ISO 4217, 3 символи | ні | `UAH` | Валюта замовлення за замовчуванням |
-| `DEFAULT_PAGE_LIMIT` | integer 1..100 | ні | `20` | Розмір сторінки cursor-пагінації |
+| Змінна | Тип / значення | Обовʼязкова | Типово | Джерело значення | Призначення |
+| --- | --- | --- | --- | --- | --- |
+| `NODE_ENV` | `development` \| `test` \| `production` | ні | `development` | оточення процесу | Режим роботи застосунку |
+| `PORT` | integer 1..65535 | ні | `3000` | оточення процесу | HTTP-порт |
+| `LOG_LEVEL` | `debug` \| `info` \| `warn` \| `error` | ні | `info` | оточення процесу | Рівень логування |
+| `DB_URL` | `postgres://<user>@<host>:<port>/<db>` | **так** | — | **сховище секретів** (оточення `dev` і `prod`); локально — `.env`, не в git | DSN Postgres бази цього проєкту, **без пароля** |
+| `DB_PASSWORD_FILE` | шлях | ні | `./secrets/db_password` | оточення процесу (шлях — не секрет) | Файл-секрет із паролем БД: сам пароль приходить зі **сховища** через змонтований файл |
+| `DB_POOL_MAX` | integer 1..100 | ні | `10` | оточення процесу | Максимум зʼєднань у пулі |
+| `DB_CONNECTION_TIMEOUT_MS` | integer 100..60000 | ні | `5000` | оточення процесу | Таймаут отримання зʼєднання |
+| `DB_SSL` | `true` \| `false` | ні | `false` | оточення процесу | TLS до Postgres |
+| `VALIDATE_RESPONSES` | `true` \| `false` | ні | `true` | оточення процесу | Валідація відповідей проти OpenAPI |
+| `DEFAULT_CURRENCY` | ISO 4217, 3 символи | ні | `UAH` | оточення процесу | Валюта замовлення за замовчуванням |
+| `DEFAULT_PAGE_LIMIT` | integer 1..100 | ні | `20` | оточення процесу | Розмір сторінки cursor-пагінації |
+
+Рядок підключення до БД (`DB_URL`) і пароль до неї — єдині секрети застосунку, і жоден із них
+не лежить у git: у репозиторії є лише `.env.example` із фейковими значеннями. Локально
+`DB_URL` береться з `.env` (у `.gitignore`), у `dev` і `prod` — зі сховища секретів, а пароль
+приходить окремо, файлом, змонтованим у `DB_PASSWORD_FILE` (docker secret / k8s secret), і
+перечитується на кожне нове зʼєднання — див. [Ротацію](#ротація-пароля-бд-без-рестарту).
+Дев-креденшели самого контейнера Postgres — інша річ: вони не секрет і лежать відкрито в
+`docker-compose.yml` та `secrets/db_password.example`, щоб базу можна було підняти зі свіжого
+клону.
 
 Числа описані через `z.coerce.number()`, а не `z.number()`: усе, що приходить з env, —
 рядок. Булеві значення — через явний `z.enum([...]).transform(...)`, бо
@@ -93,8 +109,9 @@ secrets/db_password ──▶ password: () => readFile() ──▶ pg.Pool ─�
 ```bash
 npm install
 cp .env.example .env          # реальні значення; .env у .gitignore
-npm run secrets:init          # створює secrets/db_password (стартове значення)
-npm run db:up                 # Postgres у docker compose + init.sql (сіди каталогу)
+npm run db:up                 # secrets/db_password з .example + Postgres у docker compose
+npm run db:schema             # таблиці (db/schema.sql)
+npm run db:seed               # дані: 120k товарів, 200k замовлень (~17 с)
 npm start                     # build + node dist/main.js -> http://localhost:3000
 
 curl -s localhost:3000/health
@@ -166,11 +183,102 @@ curl -s localhost:3000/health | jq '{uptime_seconds, pid, db}'
 
 - `docker compose down -v` видаляє том Postgres. Щоб після цього не отримати
   `password authentication failed`, БД бере стартовий пароль з того самого файла
-  (`POSTGRES_PASSWORD_FILE: /run/secrets/db_password`), а не з хардкоду в `init.sql`.
+  (`POSTGRES_PASSWORD_FILE: /run/secrets/db_password`), а не з хардкоду в SQL. Після скидання
+  тому таблиць немає — схему й дані треба залити знову (`npm run db:schema && npm run db:seed`).
 - `npm start` має бути не-watch, інакше перевірка fail-fast механічно не проходить.
 - Для перевірки fail-fast треба тимчасово прибрати `.env` — інакше `dotenv` тихо підхопить
   змінну з файла: `mv .env /tmp && env -u DB_URL npm start; echo $?; mv /tmp/.env .`
 - TypeScript + `pg` потребують `@types/pg` у devDependencies, інакше `tsc` падає з TS7016.
+- Схема НЕ підключена до `docker-entrypoint-initdb.d`: інакше `psql -f db/schema.sql` падав би
+  на вже створених таблицях.
+
+## Дата-шар (ДЗ-12)
+
+Схема, seed на реальний обсяг, чотири повільні запити та індекси, що їх лікують.
+Повний звіт із планами `EXPLAIN (ANALYZE, BUFFERS)` до і після — у
+[`db/OPTIMIZATIONS.md`](db/OPTIMIZATIONS.md).
+
+| | Таблиця | Рядків у seed |
+| --- | --- | --- |
+| **головна таблиця** | `orders` | 200 000 |
+| **таблиця, по якій шукає q4** | `products` | 120 000 |
+| | `users` | 50 000 |
+| | `order_items` | ~400 000 |
+
+### Підняти базу
+
+```bash
+[ -f secrets/db_password ] || cp secrets/db_password.example secrets/db_password && docker compose up -d --wait
+```
+
+Один рядок, працює на свіжому клоні без правок файлів. `secrets/db_password` у
+`.gitignore`, тому в репозиторії лежить `secrets/db_password.example` із дев-значенням —
+з нього ж бере пароль і Postgres у `docker-compose.yml`. Еквівалент через npm: `npm run db:up`.
+
+### Підключитись
+
+```bash
+docker compose exec -T db psql -U marketplace -d marketplace
+```
+
+Перевірка одним рядком: `docker compose exec -T db psql -U marketplace -d marketplace -Atc "SELECT 1"` → `1`.
+
+### Повний цикл
+
+Порядок важливий — саме в такому база проходить від нуля до індексних планів:
+
+```bash
+docker compose down -v && cp secrets/db_password.example secrets/db_password && docker compose up -d --wait
+
+docker compose exec -T db psql -U marketplace -d marketplace -v ON_ERROR_STOP=1 < db/schema.sql
+docker compose exec -T db psql -U marketplace -d marketplace -v ON_ERROR_STOP=1 < db/seed.sql
+
+RUNS=1 bash db/explain.sh          # EXPLAIN ДО індексів — у кожному плані є Seq Scan
+
+docker compose exec -T db psql -U marketplace -d marketplace -v ON_ERROR_STOP=1 < db/indexes.sql
+docker compose exec -T db psql -U marketplace -d marketplace -c "ANALYZE"
+
+bash db/explain.sh                 # EXPLAIN ПІСЛЯ — індексні плани, Seq Scan немає
+```
+
+Ті самі кроки як npm-скрипти: `npm run db:reset`, `db:schema`, `db:seed`, `db:indexes`, `db:explain`.
+
+У першому рядку `cp` без перевірки — навмисно: `down -v` видаляє том, і піднятий заново
+Postgres візьме стартовий пароль знову з `secrets/db_password.example`. Якщо не перезаписати
+файл, після ротації пароля (ДЗ-11) застосунок стукав би ротованим паролем у свіжу базу зі
+стартовим — те саме `password authentication failed`, про яке попереджає умова.
+
+`db/seed.sql` займає ~17 секунд і закінчується `VACUUM (ANALYZE)`, а не просто `ANALYZE`:
+статистику для планера дає `ANALYZE`, але visibility map виставляє лише `VACUUM` — без неї
+плани «після» лізуть у heap за видимістю й показують у рази гірші buffers.
+
+`db/explain.sh` проганяє кожен запит тричі й друкує останній прогін: перший виклик q4 після
+`CREATE INDEX` може піти по холодному GIN і показати час у рази гірший за справжній. На стенді з
+великим `shared_buffers` різниці може й не бути — але правило «взяти останній прогін» дешевше,
+ніж розбиратися, чому число не сходиться.
+
+### Запити й індекси
+
+| Запит | Що це в API | Індекс | Тип |
+| --- | --- | --- | --- |
+| [`db/queries/q1.sql`](db/queries/q1.sql) | замовлення покупця за період | `idx_orders_buyer_created_at` | складений B-tree |
+| [`db/queries/q2.sql`](db/queries/q2.sql) | черга необроблених замовлень | `idx_orders_pending_created_at` | **partial** |
+| [`db/queries/q3.sql`](db/queries/q3.sql) | пошук користувача за email без урахування регістру | `idx_users_lower_email` | **expression**, UNIQUE |
+| [`db/queries/q4.sql`](db/queries/q4.sql) | повнотекстовий пошук по каталогу | `idx_products_search_vector` | **GIN по tsvector** |
+
+Чотири індекси на чотири запити, жодного «про запас» — кожен доведено використаним
+(`idx_scan > 0` у `pg_stat_user_indexes`). Пошуковий вектор — генерована збережена колонка
+`products.search_vector`, Postgres перераховує її сам на кожному `INSERT`/`UPDATE`.
+
+Український пошук працює лише на точній словоформі: `simple` не має стемера, а української
+конфігурації в Postgres немає взагалі (29 конфігурацій, жодної української). Числа й причина —
+у секції [«Морфологія»](db/OPTIMIZATIONS.md#морфологія) звіту.
+
+### Що далі
+
+`orders`/`order_items` у схемі вже є й наповнені, але `GET /orders` у застосунку поки лишається
+in-memory: перевести його в БД — робота ДЗ-14 разом із транзакціями. ДЗ-13 бере цю саму схему в
+TypeORM-entities та міграції.
 
 ## Що в спеці
 
