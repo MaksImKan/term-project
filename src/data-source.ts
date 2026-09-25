@@ -1,6 +1,6 @@
 import 'reflect-metadata';
 import { DataSource, DataSourceOptions } from 'typeorm';
-import { Order, OrderItem, Product, User } from './entities';
+import { Order, OrderItem, Product, Task, User } from './entities';
 
 /**
  * DataSource для TypeORM CLI (міграції) і для скриптів seed / demo / report.
@@ -40,7 +40,7 @@ const shared = {
   // структуру — міграція, яку видно в code review і яку можна відкотити.
   synchronize: false,
   logging: false,
-  entities: [User, Product, Order, OrderItem],
+  entities: [User, Product, Order, OrderItem, Task],
   migrations: [__dirname + '/migrations/*.{js,ts}'],
 } satisfies Partial<DataSourceOptions>;
 

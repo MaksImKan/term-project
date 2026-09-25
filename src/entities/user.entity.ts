@@ -26,6 +26,9 @@ import { Product } from './product.entity';
 @Check('users_email_shape', `position('@' IN email) > 1`)
 @Check('users_full_name_filled', 'length(btrim(full_name)) > 0')
 @Check('users_city_filled', 'length(btrim(city)) > 0')
+// Баланс не може піти в мінус на рівні БД — навіть якщо код помилиться.
+// Це друга лінія захисту після атомарного UPDATE у checkout.
+@Check('users_balance_natural', 'balance_cents >= 0')
 export class User {
   @PrimaryGeneratedColumn('identity', {
     type: 'bigint',
@@ -44,6 +47,14 @@ export class User {
 
   @Column({ type: 'boolean', name: 'is_active', default: true })
   isActive!: boolean;
+
+  /**
+   * Гаманець покупця в цілих копійках. Списується у тій самій транзакції, що
+   * й декремент stock (src/checkout.ts) — атомарним UPDATE з умовою
+   * `balance_cents >= $n`, а не read-modify-write у JS.
+   */
+  @Column({ type: 'integer', name: 'balance_cents', default: 0 })
+  balanceCents!: number;
 
   // Звичайна колонка з DEFAULT now(), а не @CreateDateColumn: той завжди
   // перезаписує значення поточним часом, а детермінованому seed потрібні

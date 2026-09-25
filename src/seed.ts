@@ -18,17 +18,25 @@ import { Order, OrderItem, Product, User } from './entities';
 
 const D = (iso: string) => new Date(iso);
 
-const USERS: Array<Partial<User>> = [
-  { id: '1', email: 'Olena.Shevchenko@example.com', fullName: 'Олена Шевченко', city: 'Київ', createdAt: D('2026-01-10T09:00:00Z') },
-  { id: '2', email: 'Andrii.Kovalenko@example.com', fullName: 'Андрій Коваленко', city: 'Львів', createdAt: D('2026-01-12T11:30:00Z') },
-  { id: '3', email: 'Iryna.Bondarenko@example.com', fullName: 'Ірина Бондаренко', city: 'Харків', createdAt: D('2026-01-15T14:05:00Z') },
-  { id: '4', email: 'Petro.Tkachuk@example.com', fullName: 'Петро Ткачук', city: 'Одеса', createdAt: D('2026-02-01T08:20:00Z') },
-  { id: '5', email: 'Sofiia.Melnyk@example.com', fullName: 'Софія Мельник', city: 'Дніпро', createdAt: D('2026-02-03T16:45:00Z') },
-  { id: '6', email: 'Taras.Kravchuk@example.com', fullName: 'Тарас Кравчук', city: 'Вінниця', createdAt: D('2026-02-07T10:10:00Z'), isActive: false },
+/**
+ * Баланс покупця — 1 000 000.00 грн у копійках. Свідомо надлишковий: у
+ * demo:race має обмежувати САМЕ stock. Якби грошей не вистачало, число
+ * успішних checkout-ів залежало б від того, хто першим дійшов до гаманця,
+ * і стало б випадковим — а перевірка інваріанта вимагає рівно 10.
+ */
+export const SEED_BALANCE_CENTS = 100_000_000;
+
+export const USERS: Array<Partial<User>> = [
+  { id: '1', email: 'Olena.Shevchenko@example.com', fullName: 'Олена Шевченко', city: 'Київ', createdAt: D('2026-01-10T09:00:00Z'), balanceCents: SEED_BALANCE_CENTS },
+  { id: '2', email: 'Andrii.Kovalenko@example.com', fullName: 'Андрій Коваленко', city: 'Львів', createdAt: D('2026-01-12T11:30:00Z'), balanceCents: SEED_BALANCE_CENTS },
+  { id: '3', email: 'Iryna.Bondarenko@example.com', fullName: 'Ірина Бондаренко', city: 'Харків', createdAt: D('2026-01-15T14:05:00Z'), balanceCents: SEED_BALANCE_CENTS },
+  { id: '4', email: 'Petro.Tkachuk@example.com', fullName: 'Петро Ткачук', city: 'Одеса', createdAt: D('2026-02-01T08:20:00Z'), balanceCents: SEED_BALANCE_CENTS },
+  { id: '5', email: 'Sofiia.Melnyk@example.com', fullName: 'Софія Мельник', city: 'Дніпро', createdAt: D('2026-02-03T16:45:00Z'), balanceCents: SEED_BALANCE_CENTS },
+  { id: '6', email: 'Taras.Kravchuk@example.com', fullName: 'Тарас Кравчук', city: 'Вінниця', createdAt: D('2026-02-07T10:10:00Z'), isActive: false, balanceCents: SEED_BALANCE_CENTS },
 ];
 
 // Продавці — користувачі 1..3. Ціни в цілих копійках: 249900 = 2499.00 грн.
-const PRODUCTS: Array<Partial<Product>> = [
+export const PRODUCTS: Array<Partial<Product>> = [
   { id: '1',  sellerId: '1', name: 'Шкіряні кросівки',        description: 'Оригінальні шкіряні кросівки від бренду Vesna. Колір: чорний.',        priceCents: 249900, stock: 14 },
   { id: '2',  sellerId: '1', name: 'Замшеві черевики',        description: 'Оригінальні замшеві черевики від бренду Vesna. Колір: коричневий.',     priceCents: 319900, stock: 7 },
   { id: '3',  sellerId: '1', name: 'Шкіряна сумка',           description: 'Оригінальна шкіряна сумка від бренду Vesna. Колір: бежевий.',           priceCents: 189900, stock: 21 },
@@ -41,7 +49,7 @@ const PRODUCTS: Array<Partial<Product>> = [
   { id: '10', sellerId: '3', name: 'Дорожня валіза',          description: 'Оригінальна дорожня валіза від бренду Dnipro. Колір: червоний.',        priceCents: 359900, stock: 12 },
 ];
 
-const ORDERS: Array<Partial<Order>> = [
+export const ORDERS: Array<Partial<Order>> = [
   { id: '1', buyerId: '4', status: 'delivered', createdAt: D('2026-03-01T10:00:00Z'), paidAt: D('2026-03-01T10:12:00Z') },
   { id: '2', buyerId: '4', status: 'delivered', createdAt: D('2026-03-04T13:20:00Z'), paidAt: D('2026-03-04T13:25:00Z') },
   { id: '3', buyerId: '5', status: 'shipped',   createdAt: D('2026-03-08T09:15:00Z'), paidAt: D('2026-03-08T09:40:00Z') },
@@ -54,7 +62,7 @@ const ORDERS: Array<Partial<Order>> = [
 
 // (order_id, product_id, quantity). Ціна підставиться з каталогу нижче —
 // у реальному житті це знімок ціни на момент купівлі.
-const ITEMS: Array<[string, string, number]> = [
+export const ITEMS: Array<[string, string, number]> = [
   ['1', '1', 1], ['1', '4', 2],
   ['2', '7', 1], ['2', '9', 1], ['2', '4', 3],
   ['3', '8', 1],
@@ -127,8 +135,12 @@ async function main(): Promise<void> {
   }
 }
 
-main().catch((error: unknown) => {
-  console.error('\n✖ seed не відпрацював.\n');
-  console.error(error instanceof Error ? error.message : String(error));
-  process.exit(1);
-});
+// Запускаємо main лише коли файл викликали напряму: демо ДЗ-14 імпортують
+// звідси константи (SEED_BALANCE_CENTS, ORDERS) і не мусять перезаливати базу.
+if (require.main === module) {
+  main().catch((error: unknown) => {
+    console.error('\n✖ seed не відпрацював.\n');
+    console.error(error instanceof Error ? error.message : String(error));
+    process.exit(1);
+  });
+}
