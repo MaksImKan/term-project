@@ -16,3 +16,7 @@ spec.json
 secrets/*
 !secrets/.gitkeep
 !secrets/db_password.example
+
+# Креденшели доступу до сховища (Infisical). У git лежить лише приклад.
+.secrets/*
+!.secrets/infisical.env.example

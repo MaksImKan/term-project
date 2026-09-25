@@ -1,18 +1,16 @@
 # Локальний Postgres: стенд для розробки, для перевірки ротації пароля (ДЗ-11)
 # і для дата-шару (ДЗ-12).
 #
-# Пароль ролі береться з ./secrets/db_password (той самий файл, що читає
-# застосунок) — через docker secret, а не через environment: так пароль не
-# видно ані в `docker inspect`, ані в історії шарів.
+# Пароль ролі приходить файлом через docker secret, а не через environment:
+# так його не видно ані в `docker inspect`, ані в історії шарів образу.
 #
-# На свіжому клоні цього файла немає (secrets/* у .gitignore), тому команда
-# підняття стенда спершу копіює дев-значення з secrets/db_password.example:
+# Стенд піднімається на свіжому клоні однією командою, без підготовки:
 #
-#   [ -f secrets/db_password ] || cp secrets/db_password.example secrets/db_password \
-#     && docker compose up -d --wait
+#   docker compose up -d --wait
 #
-# Це дев-креденшели стенда, не секрет: вони потрібні грейдеру, щоб підняти базу
-# зі свіжого клону. Секрет застосунку (DB_URL і пароль у проді) живе у сховищі.
+# Пароль ролі Postgres бере з secrets/db_password.example (він у git — це
+# дев-креденшели, не секрет). Застосунок читає СВІЙ файл secrets/db_password,
+# який у .gitignore і який оновлює ротація; створити його: npm run secrets:init.
 #
 # Схема НЕ застосовується автоматично через docker-entrypoint-initdb.d: інакше
 # `psql -f db/schema.sql` на вже створених таблицях падав би з помилкою.
@@ -42,5 +40,10 @@ volumes:
   pgdata:
 
 secrets:
+  # Джерело — .example, а не сам secrets/db_password: той у .gitignore, і на
+  # свіжому клоні його немає, а `docker compose up -d --wait` має працювати
+  # без жодної підготовки (цього вимагає блок ## Grading у README).
+  # Це дев-креденшели стенда, не секрет. Секрет застосунку (DB_URL і пароль
+  # у проді) живе у сховищі — див. scripts/with-secrets.sh.
   db_password:
-    file: ./secrets/db_password
+    file: ./secrets/db_password.example

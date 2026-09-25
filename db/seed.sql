@@ -14,7 +14,8 @@
 -- Розподіли перекошені, як у житті:
 --   * статуси замовлень   — 42/22/18/13/5, а не рівномірно;
 --   * активність покупців — power(random(), 3): невелика група купує багато;
---   * ціни                — power(random(), 3): дешевого багато, дорогого мало;
+--   * ціни                — power(random(), 3): дешевого багато, дорогого мало
+--                           (у копійках: 50.00–30 000.00 грн);
 --   * дати                — power(random(), 2): свіжих замовлень більше;
 --   * назви товарів       — зважений словник, у якому «шкіряні» × «кросівки»
 --                           дають ~1% каталогу (селективність під q4).
@@ -126,7 +127,7 @@ adj (word, lo, hi) AS (VALUES
   ('вовняні',         0.89, 0.95),
   ('джинсові',        0.95, 1.01)
 )
-INSERT INTO products (seller_id, name, description, price, currency, stock, is_published, created_at)
+INSERT INTO products (seller_id, name, description, price_cents, currency, stock, is_published, created_at)
 SELECT
   1 + (power(gen.r_seller, 2) * 49999)::int                          AS seller_id,
   initcap(a.word) || ' ' || n.word                                   AS name,
@@ -142,7 +143,7 @@ SELECT
     || ' Колір: ' ||
   (ARRAY['чорний','білий','синій','бежевий','червоний','сірий','зелений','коричневий'])[1 + (gen.i % 8)]
     || '. Артикул ' || gen.i || '.'                                  AS description,
-  round((50 + power(gen.r_price, 3) * 29950)::numeric, 2)            AS price,
+  (5000 + power(gen.r_price, 3) * 2995000)::int                      AS price_cents,
   'UAH'                                                              AS currency,
   (power(gen.r_stock, 2) * 250)::int                                 AS stock,
   gen.r_pub < 0.95                                                   AS is_published,
@@ -172,11 +173,11 @@ status_w (status, lo, hi) AS (VALUES
   ('cancelled', 0.82, 0.95),
   ('pending',   0.95, 1.01)
 )
-INSERT INTO orders (buyer_id, status, total_amount, currency, created_at, paid_at)
+INSERT INTO orders (buyer_id, status, total_cents, currency, created_at, paid_at)
 SELECT
   1 + (power(gen.r_buyer, 3) * 49999)::int                           AS buyer_id,
   s.status                                                           AS status,
-  0                                                                  AS total_amount,
+  0                                                                  AS total_cents,
   'UAH'                                                              AS currency,
   gen.created_at                                                     AS created_at,
   CASE
@@ -192,23 +193,23 @@ JOIN status_w s ON gen.r_status >= s.lo AND gen.r_status < s.hi;
 -- product_id вибирається арифметично (два взаємно простих множники), тож
 -- позиції одного замовлення гарантовано різні — інакше UNIQUE (order_id,
 -- product_id) відбив би вставку.
--- unit_price — копія ціни на момент купівлі, а не посилання на каталог.
+-- unit_price_cents — копія ціни на момент купівлі, а не посилання на каталог.
 -- -----------------------------------------------------------------------------
-INSERT INTO order_items (order_id, product_id, quantity, unit_price)
+INSERT INTO order_items (order_id, product_id, quantity, unit_price_cents)
 SELECT
   o.id                                                               AS order_id,
   p.id                                                               AS product_id,
   1 + (random() * 3)::int                                            AS quantity,
-  p.price                                                            AS unit_price
+  p.price_cents                                                      AS unit_price_cents
 FROM orders o
 CROSS JOIN generate_series(1, 1 + (o.id % 3)) AS s(n)
 JOIN products p ON p.id = 1 + ((o.id * 7919 + s.n * 104729) % 120000);
 
 -- Сума замовлення мусить дорівнювати сумі позицій, інакше дані брешуть.
 UPDATE orders o
-SET total_amount = t.total
+SET total_cents = t.total
 FROM (
-  SELECT order_id, sum(quantity * unit_price) AS total
+  SELECT order_id, sum(quantity * unit_price_cents) AS total
   FROM order_items
   GROUP BY order_id
 ) AS t

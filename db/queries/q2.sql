@@ -1,4 +1,4 @@
-SELECT id, buyer_id, total_amount, currency, created_at
+SELECT id, buyer_id, total_cents, currency, created_at
 FROM orders
 WHERE status = 'pending'
 ORDER BY created_at DESC
