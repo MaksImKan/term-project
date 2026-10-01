@@ -5,6 +5,8 @@ NestJS + `express-openapi-validator` (ДЗ-09), керована конфігу�
 TypeORM поверх цієї схеми — entities, міграції, N+1 (ДЗ-13) — і конкурентні
 транзакції: checkout без oversell, воркер-пул на `SKIP LOCKED`, retry (ДЗ-14).
 Операційний шар бази — PgBouncer перед Postgres, нічний бекап і restore-drill (ДЗ-15).
+Тести — integration на testcontainers, E2E через supertest і контрактні тести на Pact
+із гейтом `can-i-deploy` у CI (ДЗ-16).
 
 * [Grading](#grading) — блок для грейдера: свіжий клон, чиста БД, без сховища
 * [Configuration](#configuration) — змінні середовища, запуск, ротація пароля БД
@@ -12,6 +14,7 @@ TypeORM поверх цієї схеми — entities, міграції, N+1 (Д
 * [ORM-шар](#orm-шар-дз-13) — entities, міграції, N+1, Repository проти QueryBuilder
 * [Конкурентність](#конкурентність-дз-14) — транзакційний checkout, SKIP LOCKED, retry
 * [Data layer ops](#data-layer-ops-дз-15) — PgBouncer, бекап, restore-drill
+* [Тестування](#тестування-дз-16) — testcontainers, ізоляція, E2E, Pact і гейт can-i-deploy
 
 ## Grading
 
@@ -45,7 +48,20 @@ psql -h 127.0.0.1 -p 6432 -U marketplace -d marketplace -c "SELECT 1"
 PGPASSWORD=dev_admin_0 psql -h 127.0.0.1 -p 6432 -U pgbouncer_admin -d pgbouncer -c "SHOW POOLS"
 bash scripts/with-secrets.sh dev bash scripts/backup.sh
 bash scripts/with-secrets.sh dev bash scripts/restore-drill.sh
+
+# ДЗ-16: тести. Базу підіймають самі (testcontainers), сховище їм не потрібне.
+npm run test:integration          # 10 тестів, справжній Postgres
+npm run test:e2e                  # 4 тести, повний застосунок через HTTP
+npm run test:contract             # 2 тести -> pacts/marketplace-web-marketplace-api.json
+npm run verify:provider           # застосунок проти цього контракту
+
+# ДЗ-16: брокер і гейт can-i-deploy — обидва стани, до тегу prod і після
+npm run pact:gate
 ```
+
+`verify:provider` читає контракт, який створює `test:contract` (`pacts/` — у
+`.gitignore`, це згенерований артефакт), тому порядок саме такий. Усе інше
+порядку не має.
 
 Пароль для `psql` вище — `dev_password_0` (той самий, що в `DATABASE_URL`);
 `PGPASSWORD=dev_password_0` або введений у промпті.
@@ -851,6 +867,203 @@ bash scripts/with-secrets.sh dev bash scripts/restore-drill.sh      # друку
 Виміряні числа — у [RESTORE-DRILL.md](RESTORE-DRILL.md): на обсязі сіду
 відновлення займає 1,3 с, на 200 тис. замовлень (дамп 12 MB) — 6,8 с; RPO
 нічного розкладу — 24 години, і там же розписано, чим його зменшують.
+
+## Тестування (ДЗ-16)
+
+Чотири команди — чотири рівні, і жодна з них нічого не мокає:
+
+```bash
+npm run test:integration   # репозиторії проти справжнього Postgres (testcontainers)
+npm run test:e2e           # наскрізний сценарій через HTTP на повному AppModule
+npm run test:contract      # consumer-контракт -> pacts/marketplace-web-marketplace-api.json
+npm run verify:provider    # справжній застосунок проти цього контракту
+```
+
+Порядок має значення лише в одному місці: `verify:provider` читає контракт, який
+створює `test:contract`. На свіжому клоні — спочатку `test:contract`.
+
+`npm test` запускає всі файли `test/**/*.spec.ts` одним прогоном; окремі конфіги
+(`jest.integration.config.js` і далі) відрізняються тільки `testRegex`, база —
+спільна в `jest.config.js`. Там же `reporters: ['default']` і `maxWorkers: 1`.
+`reporters` задано явно не для краси: Jest 30 сам визначає оточення
+(`detectAgent()`) і під агентом/у CI тихо підміняє репортер на компактний, після
+чого в лозі немає рядків `PASS …` і не видно, що саме пройшло. Явний `default`
+вимикає цю евристику.
+
+### Що саме перевіряється
+
+| Рівень | Файли | Чого це коштує | Що ловить |
+| --- | --- | --- | --- |
+| integration | `test/integration/*.spec.ts` (10 тестів) | контейнер Postgres на файл | FK/UNIQUE/CHECK-констрейнти, повнотекстовий пошук на `tsvector`, атомарний `UPDATE … WHERE stock >= …`, `LEFT JOIN + json_agg` і `GROUP BY`-звіт |
+| e2e | `test/e2e/*.e2e-spec.ts` (4 тести) | контейнер + повний Nest-застосунок | happy path `GET /products → POST /orders → GET /orders/{id}` і негативні кейси, де 400 віддає валідатор зі спеки ДЗ-09, а 404 — `problem+json` |
+| contract | `test/contract/*.consumer.spec.ts` (2 тести) | лише mock-сервер pact | форму відповіді, якої чекає фронтенд: `price_cents` цілим, `next_cursor` nullable |
+| provider | `test/contract/*.provider.spec.ts` (1 тест) | контейнер + застосунок + pact-ядро | що застосунок справді віддає те, що записано в контракті |
+
+Integration-тести ходять у БД через `src/repositories/*` — тонкий шар над `pg`,
+який приймає будь-який `Queryable` (пул або окремий клієнт). Ця абстракція
+зʼявилася саме через ізоляцію: щоб тест міг підсунути репозиторію клієнта з
+відкритою транзакцією.
+
+E2E і provider піднімають застосунок через `src/bootstrap.ts` —
+`configureApp(app)` ставить рівно ті самі middleware в тому самому порядку, що й
+`main.ts` (`express.json` → `express-openapi-validator` зі спеки → роути →
+глобальний `problem+json`-фільтр). Без цього винесення тест перевіряв би інший
+застосунок, ніж той, що йде в прод, і «400 від валідатора» в тесті був би
+вигадкою.
+
+База в тестах приходить тим самим шляхом конфігурації, що в проді: URI
+контейнера розбирається на `DB_URL` без пароля і тимчасовий `DB_PASSWORD_FILE`
+(zod-схема ДЗ-11 пароля в DSN не приймає). Тобто e2e заодно перевіряє і
+конфігураційний контракт.
+
+### Ізоляція: ROLLBACK для integration, TRUNCATE для e2e
+
+Це свідомо різні стратегії, бо випадки різні.
+
+**Integration — транзакція + `ROLLBACK`** (`useRollbackTransaction`): кожен тест
+отримує власний клієнт із відкритою транзакцією, після тесту — `ROLLBACK`. База
+не змінюється взагалі, тому порядок тестів не має значення, повторний прогін
+завжди зелений, а чистити нічого не треба — найдешевший і найнадійніший варіант,
+коли весь тест живе в одному зʼєднанні. Обмеження в нього теж є: зміни в
+транзакції невидимі іншим зʼєднанням, тому справжню конкурентність (два
+паралельних checkout) так не напишеш — для неї є окремі демо `src/demo-*.ts`,
+які працюють із закомічених даних.
+
+**E2E — `TRUNCATE … RESTART IDENTITY CASCADE`** перед кожним кейсом: тут
+`ROLLBACK` не працює в принципі, бо застосунок ходить у базу **власним пулом** і
+транзакції тесту просто не бачить. `RESTART IDENTITY` потрібен, щоб id не
+«текли» між кейсами, `CASCADE` — бо на `orders` посилаються `order_items` і
+`tasks`. Платимо за це швидкістю (`TRUNCATE` на кожен кейс) і тим, що e2e не
+можна ганяти паралельно по одній БД — звідси `maxWorkers: 1`.
+
+### Test data builders
+
+`test/support/builders.ts`: `aUser()`, `aProduct()`, `anOrder()` повертають
+валідний обʼєкт із дефолтами й приймають часткове перевизначення. У тесті видно
+лише те, що для нього справді важливо:
+
+```ts
+const productId = await insertProduct(q(), sellerId, aProduct({ priceCents: 100_000 }));
+```
+
+Унікальність (email, `sku`) дає `uniqueSuffix()`, тож білдери не конфліктують між
+собою навіть без очищення БД.
+
+### Контракт і брокер
+
+Контракт описує уявний фронтенд `marketplace-web` проти провайдера
+`marketplace-api`, шляхи взяті зі спеки ДЗ-09 (`/products`, `/products/{id}`).
+Значення задані матчерами, а не константами: контракт має ламатися від зміни
+**форми** відповіді, а не від того, що в базі інший товар.
+
+Provider-верифікація сідає БД через `stateHandlers` — по одному на кожен
+`given(...)` консюмера, з параметрами з контракту (`id`, `name`, `priceCents`),
+тож провайдер не вгадує дані, а отримує їх.
+
+`pacts/` — **у `.gitignore`**: це згенерований артефакт consumer-тесту, а не
+джерело правди. Джерело правди — сам consumer-тест і брокер; тримати машинний
+JSON у git означало б розвʼязувати в ньому конфлікти і рано чи пізно верифікувати
+застарілу копію.
+
+Брокер — сервіс `pact-broker` у `docker-compose.yml` (разом зі службовою БД
+`pact-broker-db`), слухає `127.0.0.1:9292`:
+
+```bash
+npm run pact:broker       # docker compose up -d --wait pact-broker
+open http://127.0.0.1:9292
+```
+
+Перший старт довгий: брокер — Rails-застосунок і накатує власні міграції, тому в
+healthcheck стоїть `start_period: 120s` — щоб `docker compose up -d --wait` не
+впав на таймауті.
+
+Адреса й токен брокера читаються **лише** з `PACT_BROKER_URL` і
+`PACT_BROKER_TOKEN`; у коді їх немає. Локально їх підкладає сховище ДЗ-11
+(`bash scripts/with-secrets.sh dev npm run verify:provider`), у CI — secrets
+GitHub. Локальний стенд авторизації не має, тому `PACT_BROKER_TOKEN` там просто
+відсутній, і ключ у опції верифаєра не додається взагалі (pact-js валідує опції
+за наявністю ключа: `pactBrokerToken: undefined` падає з `TypeError`).
+
+### Гейт can-i-deploy
+
+```bash
+npm run pact:gate         # bash scripts/pact-gate-demo.sh
+```
+
+Скрипт проходить послідовність, яку повторює джоба `contract` у
+`.github/workflows/contract.yml`:
+
+1. `docker compose up -d --wait pact-broker`
+2. публікація контракту: `PUT /pacts/provider/marketplace-api/consumer/marketplace-web/version/<v>`
+3. `npm run verify:provider` із `PACT_BROKER_URL` — результат верифікації їде в брокер (`publishVerificationResult: true`)
+4. `PUT /pacticipants/marketplace-api/versions/<v>/tags/prod` — «у prod стоїть ця версія провайдера»
+5. `GET /can-i-deploy?pacticipant=marketplace-web&version=<v>&to=prod`
+
+Публікація, тег і сам гейт — звичайний HTTP API брокера через `curl`: ні
+`pact-broker` CLI, ні ruby-гемів ставити не треба.
+
+Крок 5 викликається **двічі** — до кроку 4 і після, — і це і є вся суть гейта.
+
+До тегу:
+
+```
+5/5 can-i-deploy ДО тегу prod (очікуємо deployable: null, unknown: 1)
+  summary: {"deployable":null,"reason":"There is no verified pact between version d56ba65-191454 of marketplace-web and the version of each provider currently in prod","success":0,"failed":0,"unknown":1}
+  -> гейт НЕ пускає: у prod немає версії провайдера, з якою порівнювати
+```
+
+Після тегу:
+
+```
+5/5 can-i-deploy ПІСЛЯ тегу prod (очікуємо deployable: true)
+  summary: {"deployable":true,"reason":"All required verification results are published and successful","success":1,"failed":0,"unknown":0}
+  -> гейт пускає: контракт консюмера верифіковано версією провайдера в prod
+```
+
+Різниця одна: `unknown: 1` проти `success: 1`. `deployable: null` — це не «ні, не
+можна», а «не знаю»: у `prod` немає жодної версії провайдера, з верифікацією якої
+можна було б зіставити цей контракт. Гейт має валити деплой і в цьому випадку —
+тому в CI перевірка написана як `deployable !== true`, а не `deployable === false`.
+Формулювання `reason` залежить від версії брокера; значущі саме `deployable`,
+`unknown` і `success`.
+
+Версії в демо — `<короткий sha>-<HHMMSS>`: суфікс потрібен, щоб демо можна було
+ганяти повторно (після першого прогону версія цього коміту вже протегована
+`prod`, і другий запуск показав би одразу зелений гейт). У CI суфікса немає —
+там версія це `github.sha`, по одній на коміт.
+
+### CI
+
+`.github/workflows/contract.yml`, дві джоби:
+
+- `tests` — `tsc --noEmit`, `test:integration`, `test:e2e`. На `ubuntu-latest`
+  Docker уже є, тож testcontainers працює без service-контейнерів.
+- `contract` — кроки 1–5 вище. Крок `can-i-deploy` парсить відповідь і виходить з
+  кодом 1, якщо `summary.deployable !== true`, — джоба падає разом із ним.
+  Контракт і відповідь гейта лишаються артефактом збірки.
+
+Якщо секрету `PACT_BROKER_URL` немає (форк, свіжий репозиторій), джоба підіймає
+брокер зі стенда проєкту й працює автономно.
+
+### Якщо реєстр образів недоступний
+
+`startTestDatabase()` бере `TEST_DATABASE_URL` (або `DATABASE_URL`), якщо він є в
+оточенні, і тоді контейнер не підіймається — тести йдуть у вказану базу. Це
+потрібно для CI із service-контейнером Postgres і для середовищ без доступу до
+реєстрів образів:
+
+```bash
+TEST_DATABASE_URL=postgres://marketplace:dev_password_0@127.0.0.1:5432/marketplace_test \
+  npm run test:integration
+```
+
+У звичайному локальному прогоні змінної немає й працює саме testcontainers.
+
+Один момент, який видно лише в цьому режимі: `npm test` ганяє всі п'ять файлів
+по одній базі, а e2e і provider **комітять** (у них ізоляція через `TRUNCATE`).
+Тому кожен integration-файл бере собі відому точку відліку — один `TRUNCATE` у
+`beforeAll`, до всіх тестів. Інакше перевірка «знайшовся рівно один товар»
+побачила б чуже. З testcontainers це no-op: контейнер на файл і так чистий.
 
 ## Що в спеці
 
