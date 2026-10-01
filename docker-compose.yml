@@ -1,5 +1,9 @@
-# Локальний Postgres: стенд для розробки, для перевірки ротації пароля (ДЗ-11)
-# і для дата-шару (ДЗ-12).
+# Локальний стенд: Postgres + PgBouncer перед ним.
+#
+# Застосунок і скрипти ходять у базу через PgBouncer (127.0.0.1:6432), а не
+# напряму в 5432 — рядок підключення у сховищі ДЗ-11 вказує на пулер.
+# Порт 5432 лишається опублікованим свідомо: pg_dump, pg_restore і ротація
+# пароля (ДЗ-11) потребують СЕСІЇ, а не транзакції, тож ходять напряму.
 #
 # Пароль ролі приходить файлом через docker secret, а не через environment:
 # так його не видно ані в `docker inspect`, ані в історії шарів образу.
@@ -36,8 +40,93 @@ services:
       timeout: 3s
       retries: 10
 
+  # ── PgBouncer (ДЗ-15) ──────────────────────────────────────────────────────
+  # pool_mode = transaction, конфіг у репозиторії: pgbouncer/pgbouncer.ini.
+  # Порт опублікований, бо і застосунок, і грейдер ходять із хоста, а не з
+  # мережі compose.
+  pgbouncer:
+    image: edoburu/pgbouncer:latest
+    container_name: marketplace-pgbouncer
+    restart: unless-stopped
+    depends_on:
+      db:
+        # Пулер піднімається лише після того, як Postgres почав приймати
+        # зʼєднання: інакше перші клієнти отримали б «server login failed».
+        condition: service_healthy
+    volumes:
+      - ./pgbouncer/pgbouncer.ini:/etc/pgbouncer/pgbouncer.ini:ro
+      - ./pgbouncer/userlist.txt:/etc/pgbouncer/userlist.txt:ro
+    ports:
+      - "6432:6432"
+
+  # ── Pact Broker (ДЗ-16) ────────────────────────────────────────────────────
+  # Місце, де живуть контракти і результати їх верифікації. Саме з цих даних
+  # відповідає can-i-deploy: «чи можна випускати цю версію в prod».
+  #
+  # Публікація, тег і can-i-deploy робляться звичайним HTTP (див.
+  # scripts/pact-gate-demo.sh) — ні pact-broker CLI, ні ruby-гемів не треба.
+  #
+  # Базова авторизація свідомо вимкнена: це локальний стенд на 127.0.0.1. На
+  # справжньому брокері є токен, і код бере його ЛИШЕ з PACT_BROKER_TOKEN
+  # (сховище ДЗ-11 локально, secrets GitHub у CI) — у репозиторії його немає.
+  pact-broker:
+    image: pactfoundation/pact-broker:latest
+    container_name: marketplace-pact-broker
+    restart: unless-stopped
+    depends_on:
+      pact-broker-db:
+        condition: service_healthy
+    environment:
+      PACT_BROKER_PORT: "9292"
+      PACT_BROKER_DATABASE_ADAPTER: postgres
+      PACT_BROKER_DATABASE_HOST: pact-broker-db
+      PACT_BROKER_DATABASE_PORT: "5432"
+      PACT_BROKER_DATABASE_NAME: pactbroker
+      PACT_BROKER_DATABASE_USERNAME: pactbroker
+      PACT_BROKER_DATABASE_PASSWORD: pactbroker
+      PACT_BROKER_LOG_LEVEL: WARN
+      # Контракт — артефакт збірки, а не історія: дозволяємо перепублікувати
+      # ту саму версію консюмера, інакше повторний прогін демо впаде на 409.
+      PACT_BROKER_ALLOW_DANGEROUS_CONTRACT_MODIFICATION: "true"
+    ports:
+      - "9292:9292"
+    healthcheck:
+      # 127.0.0.1, а не localhost: у контейнері localhost може розвʼязатися в
+      # ::1, на який ruby-сервер не слухає, і healthcheck назавжди червоний.
+      # Пробуємо і curl, і wget — залежно від того, що є в образі.
+      test:
+        - CMD-SHELL
+        - >-
+          curl -fsS http://127.0.0.1:9292/diagnostic/status/heartbeat
+          || wget -q -O- http://127.0.0.1:9292/diagnostic/status/heartbeat
+      interval: 5s
+      timeout: 5s
+      retries: 30
+      # Брокер — це Rails: перший старт накатує свої міграції і прогрівається
+      # довго. Запас потрібен, щоб `docker compose up -d --wait` не впав.
+      start_period: 120s
+
+  # Службова БД брокера. Порт не публікується: назовні нічого не видно.
+  pact-broker-db:
+    image: postgres:16-alpine
+    container_name: marketplace-pact-broker-db
+    restart: unless-stopped
+    environment:
+      POSTGRES_USER: pactbroker
+      POSTGRES_DB: pactbroker
+      # Дев-креденшели службової БД локального стенда — не секрет.
+      POSTGRES_PASSWORD: pactbroker
+    volumes:
+      - pactbrokerdata:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U pactbroker -d pactbroker"]
+      interval: 5s
+      timeout: 3s
+      retries: 10
+
 volumes:
   pgdata:
+  pactbrokerdata:
 
 secrets:
   # Джерело — .example, а не сам secrets/db_password: той у .gitignore, і на

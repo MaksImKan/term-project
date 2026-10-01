@@ -1,43 +1,21 @@
+import { ConfigService } from '@nestjs/config';
 import { NestFactory } from '@nestjs/core';
 import { NestExpressApplication } from '@nestjs/platform-express';
-import { ConfigService } from '@nestjs/config';
-import express from 'express';
-import * as path from 'path';
-import * as OpenApiValidator from 'express-openapi-validator';
 import { AppModule } from './app.module';
-import { ProblemJsonFilter } from './problem/problem.filter';
+import { NEST_APP_OPTIONS, configureApp } from './bootstrap';
 import { Env } from './config/env.schema';
 
 async function bootstrap(): Promise<void> {
-  // bodyParser: false — самі ставимо express.json() ПЕРЕД валідатором,
-  // щоб гарантувати порядок middleware: json -> validator -> роути.
-  const app = await NestFactory.create<NestExpressApplication>(AppModule, {
-    bodyParser: false,
-  });
+  const app = await NestFactory.create<NestExpressApplication>(AppModule, NEST_APP_OPTIONS);
+
+  // Те саме налаштування, що застосовують e2e-тести й provider-верифікація:
+  // порядок middleware, валідація проти openapi.yaml, problem+json, shutdown
+  // hooks. Один виклик — одна правда про те, як зібраний застосунок.
+  configureApp(app);
 
   // Єдина точка доступу до конфігурації: типізований ConfigService.
   // Прямих читань process.env поза zod-схемою у коді немає.
   const config = app.get(ConfigService) as ConfigService<Env, true>;
-
-  const instance = app.getHttpAdapter().getInstance();
-
-  // 1) парсинг тіла
-  instance.use(express.json());
-
-  // 2) express-openapi-validator: валідація ЗАПИТІВ і ВІДПОВІДЕЙ проти спеки
-  instance.use(
-    OpenApiValidator.middleware({
-      apiSpec: path.join(process.cwd(), 'openapi', 'openapi.yaml'),
-      validateRequests: true,
-      validateResponses: config.get('VALIDATE_RESPONSES', { infer: true }),
-    }),
-  );
-
-  // помилки, кинуті у Nest-контексті (404/422 із сервісів) -> problem+json
-  app.useGlobalFilters(new ProblemJsonFilter());
-
-  // щоб onApplicationShutdown закрив пул Postgres
-  app.enableShutdownHooks();
 
   const port = config.get('PORT', { infer: true });
   await app.listen(port);

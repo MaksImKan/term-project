@@ -4,12 +4,17 @@ NestJS + `express-openapi-validator` (ДЗ-09), керована конфігу�
 секретів (ДЗ-11), дата-шар на Postgres з індексами та повнотекстовим пошуком (ДЗ-12)
 TypeORM поверх цієї схеми — entities, міграції, N+1 (ДЗ-13) — і конкурентні
 транзакції: checkout без oversell, воркер-пул на `SKIP LOCKED`, retry (ДЗ-14).
+Операційний шар бази — PgBouncer перед Postgres, нічний бекап і restore-drill (ДЗ-15).
+Тести — integration на testcontainers, E2E через supertest і контрактні тести на Pact
+із гейтом `can-i-deploy` у CI (ДЗ-16).
 
 * [Grading](#grading) — блок для грейдера: свіжий клон, чиста БД, без сховища
 * [Configuration](#configuration) — змінні середовища, запуск, ротація пароля БД
 * [Дата-шар](#дата-шар-дз-12) — схема, seed на 100k+, `EXPLAIN` до і після індексів
 * [ORM-шар](#orm-шар-дз-13) — entities, міграції, N+1, Repository проти QueryBuilder
 * [Конкурентність](#конкурентність-дз-14) — транзакційний checkout, SKIP LOCKED, retry
+* [Data layer ops](#data-layer-ops-дз-15) — PgBouncer, бекап, restore-drill
+* [Тестування](#тестування-дз-16) — testcontainers, ізоляція, E2E, Pact і гейт can-i-deploy
 
 ## Grading
 
@@ -18,7 +23,8 @@ TypeORM поверх цієї схеми — entities, міграції, N+1 (Д
 
 ```bash
 docker compose up -d --wait
-export DATABASE_URL=postgres://marketplace:dev_password_0@127.0.0.1:5432/marketplace
+# 6432 — це PgBouncer (сервіс pgbouncer), а не прямий порт Postgres
+export DATABASE_URL=postgres://marketplace:dev_password_0@127.0.0.1:6432/marketplace
 export SKIP_VAULT=1    # у грейдера немає доступу до сховища
 
 npm ci
@@ -36,7 +42,36 @@ npm run report                    # ДЗ-13: агрегат через QueryBuil
 npm run demo:race                 # ДЗ-14: 50 паралельних checkout, oversell = 0
 npm run demo:workers              # ДЗ-14: воркер-пул на SKIP LOCKED
 npm run demo:retry                # ДЗ-14: serialization failure + повтор
+
+# ДЗ-15: пулер, бекап, restore-drill
+psql -h 127.0.0.1 -p 6432 -U marketplace -d marketplace -c "SELECT 1"
+PGPASSWORD=dev_admin_0 psql -h 127.0.0.1 -p 6432 -U pgbouncer_admin -d pgbouncer -c "SHOW POOLS"
+bash scripts/with-secrets.sh dev bash scripts/backup.sh
+bash scripts/with-secrets.sh dev bash scripts/restore-drill.sh
+
+# ДЗ-16: тести. Базу підіймають самі (testcontainers), сховище їм не потрібне.
+npm run test:integration          # 10 тестів, справжній Postgres
+npm run test:e2e                  # 4 тести, повний застосунок через HTTP
+npm run test:contract             # 2 тести -> pacts/marketplace-web-marketplace-api.json
+npm run verify:provider           # застосунок проти цього контракту
+
+# ДЗ-16: брокер і гейт can-i-deploy — обидва стани, до тегу prod і після
+npm run pact:gate
 ```
+
+`verify:provider` читає контракт, який створює `test:contract` (`pacts/` — у
+`.gitignore`, це згенерований артефакт), тому порядок саме такий. Усе інше
+порядку не має.
+
+Пароль для `psql` вище — `dev_password_0` (той самий, що в `DATABASE_URL`);
+`PGPASSWORD=dev_password_0` або введений у промпті.
+
+`backup.sh` і `restore-drill.sh` читають підключення з `$DATABASE_URL` самі, тому
+під `SKIP_VAULT=1` обгортка просто виконує їх як є — обидві форми запуску
+(`bash scripts/with-secrets.sh dev bash scripts/backup.sh` і голий
+`bash scripts/backup.sh`) дають однаковий результат. `pg_dump` при цьому свідомо
+йде напряму в `:5432`, в обхід пулера, і друкує це в лозі — чому саме так,
+у розділі [Data layer ops](#data-layer-ops-дз-15).
 
 `package.json` лежить у корені репозиторію, тому жодного `cd` перед цими
 командами не потрібно.
@@ -45,7 +80,7 @@ npm run demo:retry                # ДЗ-14: serialization failure + повто�
 розуміє обидві форми:
 
 ```bash
-export DB_HOST=127.0.0.1 DB_PORT=5432 DB_USER=marketplace DB_PASSWORD=dev_password_0 DB_NAME=marketplace
+export DB_HOST=127.0.0.1 DB_PORT=6432 DB_USER=marketplace DB_PASSWORD=dev_password_0 DB_NAME=marketplace
 ```
 
 Креденшели вище — дев-значення стенда з `docker-compose.yml`; вони не секрет і
@@ -114,6 +149,11 @@ docker compose exec -T db psql -U marketplace -d marketplace -Atc \
 | `src/demo-race.ts`              | 50 паралельних checkout-ів: перевірка на oversell               |
 | `src/demo-workers.ts`           | Воркер-пул через `FOR UPDATE SKIP LOCKED`                       |
 | `src/demo-retry.ts`             | Serialization failure «до/після» retry                          |
+| `pgbouncer/*`                   | Конфіг PgBouncer: `pool_mode = transaction`, userlist           |
+| `scripts/backup.sh`             | `pg_dump -Fc` із датою в імені + контрольне значення            |
+| `scripts/restore-drill.sh`      | Відновлення у чистий контейнер, порівняння «до/після»           |
+| `backup.cron`                   | Нічний розклад бекапу                                           |
+| `RESTORE-DRILL.md`              | Протокол drill-у: розмір, час, RTO, RPO                         |
 | `Dockerfile`, `.dockerignore`   | Образ без секретів у шарах                                     |
 | `README.md`                     | Цей файл                                                       |
 
@@ -685,6 +725,345 @@ QueryBuilder (`setLock('pessimistic_write')` + `setOnLocked('skip_locked')`),
 знімок схеми ДЗ-12, а джерелом правди для структури з ДЗ-13 є міграції
 (про це є рядок у розділі [ORM-шар](#orm-шар-дз-13)). Змішувати два шляхи не
 варто: `psql -f db/schema.sql` на базі, де вже відпрацювали міграції, впаде.
+
+## Data layer ops (ДЗ-15)
+
+Два атрибути production-системи поверх дата-шару: пулер зʼєднань перед Postgres
+і бекап, у відновленні якого є впевненість, бо його відновлювали.
+
+| Файл | Призначення |
+| --- | --- |
+| [`pgbouncer/pgbouncer.ini`](pgbouncer/pgbouncer.ini) | конфіг пулера: `pool_mode = transaction`, адмін-консоль |
+| [`pgbouncer/userlist.txt`](pgbouncer/userlist.txt) | дев-креденшели стенда для SCRAM-автентифікації |
+| [`scripts/backup.sh`](scripts/backup.sh) | `pg_dump -Fc` у файл із датою + контрольне значення поруч |
+| [`scripts/restore-drill.sh`](scripts/restore-drill.sh) | відновлення у чистий контейнер і порівняння «до/після» |
+| [`scripts/lib-db.sh`](scripts/lib-db.sh) | розбір `DATABASE_URL`, запуск `psql`/`pg_dump` |
+| [`backup.cron`](backup.cron) | нічний розклад |
+| [`RESTORE-DRILL.md`](RESTORE-DRILL.md) | протокол drill-у: дата, розмір, час, RTO і RPO |
+
+### Підняти і перевірити
+
+```bash
+docker compose up -d --wait
+
+# застосунок ходить сюди — порт 6432 це PgBouncer
+psql -h 127.0.0.1 -p 6432 -U marketplace -d marketplace -c "SELECT 1"
+
+# адмін-консоль пулера
+PGPASSWORD=dev_admin_0 psql -h 127.0.0.1 -p 6432 -U pgbouncer_admin -d pgbouncer -c "SHOW POOLS"
+```
+
+Якщо `docker compose logs pgbouncer` скаржиться на конфіг: образ
+`edoburu/pgbouncer` за документацією читає саме змонтовані
+`/etc/pgbouncer/pgbouncer.ini` і `/etc/pgbouncer/userlist.txt` (так він тут і
+підключений). На випадок зміни поведінки образу достатньо дописати сервісу
+`command: ["/usr/bin/pgbouncer", "/etc/pgbouncer/pgbouncer.ini"]` — тоді
+entrypoint обходиться стороною й запускається рівно наш конфіг.
+
+`SHOW POOLS` показує базу `marketplace` з `pool_mode = transaction`. Рядок
+підключення у сховищі (ДЗ-11) і контракт у `.env.example` вказують на `:6432`;
+прямий `:5432` лишається опублікованим свідомо — для `pg_dump`, `pg_restore` і
+ротації пароля, яким потрібна сесія.
+
+Що це дає, виміряно на цьому стенді: `npm run demo:race` відкриває **55
+клієнтських зʼєднань**, а Postgres під час цього бачить **8 серверних бекендів**
+(`default_pool_size = 8`). Усі 50 паралельних checkout-ів відпрацювали так само
+коректно — 10 успішних, `stock = 0`, `oversell = 0`. Тобто пулер прибрав
+зростання числа бекендів, не змінивши семантики транзакцій.
+
+### Чому transaction mode і що він ламає
+
+`session` (режим за замовчуванням) закріплює серверне зʼєднання за клієнтом на
+весь час його життя. Для застосунку з пулом на 50 зʼєднань це означає 50 бекендів
+у Postgres — тобто пулер не дає нічого, крім зайвого стрибка в мережі. `statement`
+звільняє зʼєднання після кожного вислову й тому взагалі забороняє багатовислівні
+транзакції — наш `checkout` із чотирьох кроків у ньому неможливий.
+`transaction` — єдиний режим, у якому і транзакції цілі, і серверних зʼєднань
+залишається вісім на двісті клієнтів.
+
+Ціна в тому, що між двома транзакціями одного клієнта серверне зʼєднання може
+бути вже іншим. Ламається все, що тримає стан у **сесії**, а не в транзакції:
+
+1. **`SET` рівня сесії.** `SET search_path`, `SET statement_timeout`,
+   `SET TIME ZONE`, зроблені поза транзакцією, зникають: наступна транзакція
+   поїде на інший бекенд. Тихо, без помилки — і це найгірший варіант.
+   Лікується `SET LOCAL` усередині транзакції або параметрами в рядку підключення.
+2. **Named prepared statements.** `PREPARE` на одному бекенді, `EXECUTE` на
+   іншому — `prepared statement "s1" does not exist`. Драйвери, що кешують
+   запити за іменем (JDBC, `asyncpg`), падають одразу. `node-postgres`, на якому
+   стоїть TypeORM, за замовчуванням надсилає **неназвані** запити, тож нас це не
+   чіпає; на випадок зміни драйвера в конфізі стоїть
+   `max_prepared_statements = 200` — PgBouncer ≥ 1.21 відстежує такі запити й
+   перевиконує `PREPARE` на новому зʼєднанні сам.
+3. **`LISTEN` / `NOTIFY`.** Підписка належить сесії. У transaction mode зʼєднання
+   повертається в пул одразу після транзакції, і сповіщення нікуди не приходить.
+   Саме тому черга задач у цьому проєкті зроблена таблицею і
+   `FOR UPDATE SKIP LOCKED` (ДЗ-14), а не на `LISTEN/NOTIFY`.
+4. **Сесійні advisory-локи.** `pg_advisory_lock()` утримується до кінця сесії —
+   тобто до моменту, який клієнт більше не контролює: лок або «втече» на чуже
+   зʼєднання, або не звільниться взагалі. Транзакційний варіант
+   `pg_advisory_xact_lock()` знімається на COMMIT і працює коректно.
+5. **Тимчасові таблиці й курсори `WITH HOLD`.** `CREATE TEMP TABLE` живе в сесії;
+   наступна транзакція її вже не побачить.
+6. **`pg_dump` / `pg_restore`.** `pg_dump` відкриває транзакцію, фіксує їй
+   snapshot і може чіпляти паралельні зʼєднання до того самого snapshot —
+   транзакційний пулер роздасть ці зʼєднання різним бекендам. Тому
+   `scripts/backup.sh` свідомо ходить **напряму** в `:5432`, і друкує це в лозі.
+
+Ще одна взаємодія, вже не з лекції, а з нашим ДЗ-11: ротація пароля БД.
+PgBouncer автентифікує клієнтів за `userlist.txt`, тож після `rotate.sh` пароль у
+базі новий, а пулер знає старий — застосунок через пулер отримає помилку входу.
+Для стенда лікується оновленням `userlist.txt` і `RELOAD` у адмін-консолі; у
+проді правильна відповідь — `auth_query`: пулер питає хеш у самого Postgres і
+статичного файла з паролями не тримає взагалі.
+
+### Бекап
+
+```bash
+bash scripts/with-secrets.sh dev bash scripts/backup.sh
+```
+
+Складає `pg_dump -Fc` у `backups/marketplace_<дата>_<час>.dump` (тека в
+`.gitignore` — дампи це артефакти, не код) і поруч два службові файли:
+
+* `*.checksum` — `count|sum` по `orders` **на момент дампу**. Саме з цим числом
+  порівнює drill: порівнювати з живою базою нечесно, вона вже змінилась.
+* `*.sha256` — цілісність самого архіву.
+
+Скрипт друкує шлях створеного файла, розмір, час і кількість записів TOC
+(`pg_restore --list` читається — доказ валідного `-Fc` архіву), і прибирає копії
+старші за останні `BACKUP_KEEP` (типово 14 — два тижні нічних бекапів).
+
+Рядок підключення береться тільки з оточення (`DATABASE_URL`/`DB_URL`), який
+наповнює обгортка сховища. Пароль може бути відсутній у DSN — тоді скрипт візьме
+його з файла-секрета `secrets/db_password`, тобто з того самого джерела, що й
+застосунок. Призначення — локальна тека; перенесення в S3 заплановане на ДЗ-26,
+і ключі тоді ляжуть у те саме сховище, а не в новий env-файл.
+
+Розклад — у [`backup.cron`](backup.cron): `17 3 * * *`, щоночі о 03:17 (не рівно
+о третій, щоб не збігатися з усіма іншими нічними задачами). Перед встановленням
+замінити шлях до репозиторію: у cron немає ані `cwd`, ані вашого `PATH`.
+
+```bash
+crontab backup.cron && crontab -l
+```
+
+### Відновлення
+
+```bash
+bash scripts/with-secrets.sh dev bash scripts/restore-drill.sh      # друкує MATCH
+```
+
+Скрипт бере найсвіжіший дамп, створює **новий** том і контейнер
+`postgres:16-alpine`, відновлює туди з `--no-owner --no-acl` (ролі `marketplace`
+у чистому контейнері немає), знімає `count|sum` і порівнює з `*.checksum`.
+Прибирає за собою в `trap` — навіть якщо впав посередині, тож повторний запуск
+теж дає `MATCH`: кожен прогін починається з порожнього тому.
+
+Якщо Docker недоступний (CI-раннер без DinD), скрипт робить те саме в
+тимчасовому кластері Postgres, який сам створює через `initdb` і сам зносить.
+Режим він друкує у першому ж рядку, щоб не було сумнівів, що саме перевірено.
+
+Виміряні числа — у [RESTORE-DRILL.md](RESTORE-DRILL.md): на обсязі сіду
+відновлення займає 1,3 с, на 200 тис. замовлень (дамп 12 MB) — 6,8 с; RPO
+нічного розкладу — 24 години, і там же розписано, чим його зменшують.
+
+## Тестування (ДЗ-16)
+
+Чотири команди — чотири рівні, і жодна з них нічого не мокає:
+
+```bash
+npm run test:integration   # репозиторії проти справжнього Postgres (testcontainers)
+npm run test:e2e           # наскрізний сценарій через HTTP на повному AppModule
+npm run test:contract      # consumer-контракт -> pacts/marketplace-web-marketplace-api.json
+npm run verify:provider    # справжній застосунок проти цього контракту
+```
+
+Порядок має значення лише в одному місці: `verify:provider` читає контракт, який
+створює `test:contract`. На свіжому клоні — спочатку `test:contract`.
+
+`npm test` запускає всі файли `test/**/*.spec.ts` одним прогоном; окремі конфіги
+(`jest.integration.config.js` і далі) відрізняються тільки `testRegex`, база —
+спільна в `jest.config.js`. Там же `reporters: ['default']` і `maxWorkers: 1`.
+`reporters` задано явно не для краси: Jest 30 сам визначає оточення
+(`detectAgent()`) і під агентом/у CI тихо підміняє репортер на компактний, після
+чого в лозі немає рядків `PASS …` і не видно, що саме пройшло. Явний `default`
+вимикає цю евристику.
+
+### Що саме перевіряється
+
+| Рівень | Файли | Чого це коштує | Що ловить |
+| --- | --- | --- | --- |
+| integration | `test/integration/*.spec.ts` (10 тестів) | контейнер Postgres на файл | FK/UNIQUE/CHECK-констрейнти, повнотекстовий пошук на `tsvector`, атомарний `UPDATE … WHERE stock >= …`, `LEFT JOIN + json_agg` і `GROUP BY`-звіт |
+| e2e | `test/e2e/*.e2e-spec.ts` (4 тести) | контейнер + повний Nest-застосунок | happy path `GET /products → POST /orders → GET /orders/{id}` і негативні кейси, де 400 віддає валідатор зі спеки ДЗ-09, а 404 — `problem+json` |
+| contract | `test/contract/*.consumer.spec.ts` (2 тести) | лише mock-сервер pact | форму відповіді, якої чекає фронтенд: `price_cents` цілим, `next_cursor` nullable |
+| provider | `test/contract/*.provider.spec.ts` (1 тест) | контейнер + застосунок + pact-ядро | що застосунок справді віддає те, що записано в контракті |
+
+Integration-тести ходять у БД через `src/repositories/*` — тонкий шар над `pg`,
+який приймає будь-який `Queryable` (пул або окремий клієнт). Ця абстракція
+зʼявилася саме через ізоляцію: щоб тест міг підсунути репозиторію клієнта з
+відкритою транзакцією.
+
+E2E і provider піднімають застосунок через `src/bootstrap.ts` —
+`configureApp(app)` ставить рівно ті самі middleware в тому самому порядку, що й
+`main.ts` (`express.json` → `express-openapi-validator` зі спеки → роути →
+глобальний `problem+json`-фільтр). Без цього винесення тест перевіряв би інший
+застосунок, ніж той, що йде в прод, і «400 від валідатора» в тесті був би
+вигадкою.
+
+База в тестах приходить тим самим шляхом конфігурації, що в проді: URI
+контейнера розбирається на `DB_URL` без пароля і тимчасовий `DB_PASSWORD_FILE`
+(zod-схема ДЗ-11 пароля в DSN не приймає). Тобто e2e заодно перевіряє і
+конфігураційний контракт.
+
+### Ізоляція: ROLLBACK для integration, TRUNCATE для e2e
+
+Це свідомо різні стратегії, бо випадки різні.
+
+**Integration — транзакція + `ROLLBACK`** (`useRollbackTransaction`): кожен тест
+отримує власний клієнт із відкритою транзакцією, після тесту — `ROLLBACK`. База
+не змінюється взагалі, тому порядок тестів не має значення, повторний прогін
+завжди зелений, а чистити нічого не треба — найдешевший і найнадійніший варіант,
+коли весь тест живе в одному зʼєднанні. Обмеження в нього теж є: зміни в
+транзакції невидимі іншим зʼєднанням, тому справжню конкурентність (два
+паралельних checkout) так не напишеш — для неї є окремі демо `src/demo-*.ts`,
+які працюють із закомічених даних.
+
+**E2E — `TRUNCATE … RESTART IDENTITY CASCADE`** перед кожним кейсом: тут
+`ROLLBACK` не працює в принципі, бо застосунок ходить у базу **власним пулом** і
+транзакції тесту просто не бачить. `RESTART IDENTITY` потрібен, щоб id не
+«текли» між кейсами, `CASCADE` — бо на `orders` посилаються `order_items` і
+`tasks`. Платимо за це швидкістю (`TRUNCATE` на кожен кейс) і тим, що e2e не
+можна ганяти паралельно по одній БД — звідси `maxWorkers: 1`.
+
+### Test data builders
+
+`test/support/builders.ts`: `aUser()`, `aProduct()`, `anOrder()` повертають
+валідний обʼєкт із дефолтами й приймають часткове перевизначення. У тесті видно
+лише те, що для нього справді важливо:
+
+```ts
+const productId = await insertProduct(q(), sellerId, aProduct({ priceCents: 100_000 }));
+```
+
+Унікальність (email, `sku`) дає `uniqueSuffix()`, тож білдери не конфліктують між
+собою навіть без очищення БД.
+
+### Контракт і брокер
+
+Контракт описує уявний фронтенд `marketplace-web` проти провайдера
+`marketplace-api`, шляхи взяті зі спеки ДЗ-09 (`/products`, `/products/{id}`).
+Значення задані матчерами, а не константами: контракт має ламатися від зміни
+**форми** відповіді, а не від того, що в базі інший товар.
+
+Provider-верифікація сідає БД через `stateHandlers` — по одному на кожен
+`given(...)` консюмера, з параметрами з контракту (`id`, `name`, `priceCents`),
+тож провайдер не вгадує дані, а отримує їх.
+
+`pacts/` — **у `.gitignore`**: це згенерований артефакт consumer-тесту, а не
+джерело правди. Джерело правди — сам consumer-тест і брокер; тримати машинний
+JSON у git означало б розвʼязувати в ньому конфлікти і рано чи пізно верифікувати
+застарілу копію.
+
+Брокер — сервіс `pact-broker` у `docker-compose.yml` (разом зі службовою БД
+`pact-broker-db`), слухає `127.0.0.1:9292`:
+
+```bash
+npm run pact:broker       # docker compose up -d --wait pact-broker
+open http://127.0.0.1:9292
+```
+
+Перший старт довгий: брокер — Rails-застосунок і накатує власні міграції, тому в
+healthcheck стоїть `start_period: 120s` — щоб `docker compose up -d --wait` не
+впав на таймауті.
+
+Адреса й токен брокера читаються **лише** з `PACT_BROKER_URL` і
+`PACT_BROKER_TOKEN`; у коді їх немає. Локально їх підкладає сховище ДЗ-11
+(`bash scripts/with-secrets.sh dev npm run verify:provider`), у CI — secrets
+GitHub. Локальний стенд авторизації не має, тому `PACT_BROKER_TOKEN` там просто
+відсутній, і ключ у опції верифаєра не додається взагалі (pact-js валідує опції
+за наявністю ключа: `pactBrokerToken: undefined` падає з `TypeError`).
+
+### Гейт can-i-deploy
+
+```bash
+npm run pact:gate         # bash scripts/pact-gate-demo.sh
+```
+
+Скрипт проходить послідовність, яку повторює джоба `contract` у
+`.github/workflows/contract.yml`:
+
+1. `docker compose up -d --wait pact-broker`
+2. публікація контракту: `PUT /pacts/provider/marketplace-api/consumer/marketplace-web/version/<v>`
+3. `npm run verify:provider` із `PACT_BROKER_URL` — результат верифікації їде в брокер (`publishVerificationResult: true`)
+4. `PUT /pacticipants/marketplace-api/versions/<v>/tags/prod` — «у prod стоїть ця версія провайдера»
+5. `GET /can-i-deploy?pacticipant=marketplace-web&version=<v>&to=prod`
+
+Публікація, тег і сам гейт — звичайний HTTP API брокера через `curl`: ні
+`pact-broker` CLI, ні ruby-гемів ставити не треба.
+
+Крок 5 викликається **двічі** — до кроку 4 і після, — і це і є вся суть гейта.
+
+До тегу:
+
+```
+5/5 can-i-deploy ДО тегу prod (очікуємо deployable: null, unknown: 1)
+  summary: {"deployable":null,"reason":"There is no verified pact between version d56ba65-191454 of marketplace-web and the version of each provider currently in prod","success":0,"failed":0,"unknown":1}
+  -> гейт НЕ пускає: у prod немає версії провайдера, з якою порівнювати
+```
+
+Після тегу:
+
+```
+5/5 can-i-deploy ПІСЛЯ тегу prod (очікуємо deployable: true)
+  summary: {"deployable":true,"reason":"All required verification results are published and successful","success":1,"failed":0,"unknown":0}
+  -> гейт пускає: контракт консюмера верифіковано версією провайдера в prod
+```
+
+Різниця одна: `unknown: 1` проти `success: 1`. `deployable: null` — це не «ні, не
+можна», а «не знаю»: у `prod` немає жодної версії провайдера, з верифікацією якої
+можна було б зіставити цей контракт. Гейт має валити деплой і в цьому випадку —
+тому в CI перевірка написана як `deployable !== true`, а не `deployable === false`.
+Формулювання `reason` залежить від версії брокера; значущі саме `deployable`,
+`unknown` і `success`.
+
+Версії в демо — `<короткий sha>-<HHMMSS>`: суфікс потрібен, щоб демо можна було
+ганяти повторно (після першого прогону версія цього коміту вже протегована
+`prod`, і другий запуск показав би одразу зелений гейт). У CI суфікса немає —
+там версія це `github.sha`, по одній на коміт.
+
+### CI
+
+`.github/workflows/contract.yml`, дві джоби:
+
+- `tests` — `tsc --noEmit`, `test:integration`, `test:e2e`. На `ubuntu-latest`
+  Docker уже є, тож testcontainers працює без service-контейнерів.
+- `contract` — кроки 1–5 вище. Крок `can-i-deploy` парсить відповідь і виходить з
+  кодом 1, якщо `summary.deployable !== true`, — джоба падає разом із ним.
+  Контракт і відповідь гейта лишаються артефактом збірки.
+
+Якщо секрету `PACT_BROKER_URL` немає (форк, свіжий репозиторій), джоба підіймає
+брокер зі стенда проєкту й працює автономно.
+
+### Якщо реєстр образів недоступний
+
+`startTestDatabase()` бере `TEST_DATABASE_URL` (або `DATABASE_URL`), якщо він є в
+оточенні, і тоді контейнер не підіймається — тести йдуть у вказану базу. Це
+потрібно для CI із service-контейнером Postgres і для середовищ без доступу до
+реєстрів образів:
+
+```bash
+TEST_DATABASE_URL=postgres://marketplace:dev_password_0@127.0.0.1:5432/marketplace_test \
+  npm run test:integration
+```
+
+У звичайному локальному прогоні змінної немає й працює саме testcontainers.
+
+Один момент, який видно лише в цьому режимі: `npm test` ганяє всі п'ять файлів
+по одній базі, а e2e і provider **комітять** (у них ізоляція через `TRUNCATE`).
+Тому кожен integration-файл бере собі відому точку відліку — один `TRUNCATE` у
+`beforeAll`, до всіх тестів. Інакше перевірка «знайшовся рівно один товар»
+побачила б чуже. З testcontainers це no-op: контейнер на файл і так чистий.
 
 ## Що в спеці
 
