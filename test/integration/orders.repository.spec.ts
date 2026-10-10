@@ -66,6 +66,40 @@ describe('OrdersRepository (integration)', () => {
     expect(found!.total_cents).toBe(0);
   });
 
+  it('ставить paid_at серверним now(), а не клієнтським часом (CHECK orders_paid_at_sane)', async () => {
+    const buyerId = await insertUser(q());
+
+    const paid = await repo().create(buyerId, 'paid');
+
+    // Через це тест із GROUP BY нижче «мерехтів»: paid_at брався з new Date() у
+    // Node (роздільність — мілісекунда), а created_at приходить із DEFAULT now()
+    // (мікросекунди), і CHECK (paid_at >= created_at) валив саму вставку.
+    // now() у SQL — transaction_timestamp, однаковий для обох колонок, тому
+    // часи тут мусять збігтися ТОЧНО, а не «майже».
+    expect(paid.paid_at).not.toBeNull();
+    expect(paid.paid_at!.getTime()).toBe(paid.created_at.getTime());
+
+    // І те саме очима БД, умовою самого констрейнта.
+    const { rows } = await q().query<{ sane: boolean }>(
+      'SELECT paid_at >= created_at AS sane FROM orders WHERE id = $1',
+      [paid.id],
+    );
+    expect(rows[0].sane).toBe(true);
+  });
+
+  it('не ставить paid_at незакритому й скасованому замовленню', async () => {
+    const buyerId = await insertUser(q());
+
+    // Умову «кому paid_at не потрібен» теж вирішує SQL, тож перевіряємо саму
+    // поведінку запиту, а не гілку в TypeScript.
+    expect((await repo().create(buyerId, 'pending')).paid_at).toBeNull();
+    expect((await repo().create(buyerId, 'cancelled')).paid_at).toBeNull();
+
+    // А статус поза цими двома paid_at отримує — інакше спрацював би
+    // CHECK orders_paid_has_paid_at.
+    expect((await repo().create(buyerId, 'shipped')).paid_at).not.toBeNull();
+  });
+
   it('агрегує виторг по продавцях і рахує лише оплачені замовлення (GROUP BY)', async () => {
     const buyerId = await insertUser(q());
     const seller = await insertUser(q(), aUser({ fullName: 'Ірина Бондаренко' }));

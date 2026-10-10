@@ -8,6 +8,16 @@ export interface OrderRow extends Record<string, unknown> {
   currency: string;
 }
 
+/**
+ * Те, що віддає create(): окремий тип, бо тут є ще й часи. У OrderRow їх немає
+ * свідомо — findWithItems() цих колонок не читає, і розширювати через нього
+ * OrderWithItems означало б, що тип обіцяє поля, яких у відповіді не буде.
+ */
+export interface CreatedOrderRow extends OrderRow {
+  created_at: Date;
+  paid_at: Date | null;
+}
+
 export interface OrderItemRow extends Record<string, unknown> {
   id: string;
   order_id: string;
@@ -41,13 +51,39 @@ export interface SellerRevenueRow extends Record<string, unknown> {
 export class OrdersRepository {
   constructor(private readonly db: Queryable) {}
 
-  async create(buyerId: string, status = 'pending'): Promise<OrderRow> {
-    const paidAt = status === 'pending' || status === 'cancelled' ? null : new Date();
-    const { rows } = await this.db.query<OrderRow>(
+  /**
+   * paid_at ставить СЕРВЕР, а не клієнт — і це не стиль, а умова констрейнта.
+   *
+   * `created_at` приходить із `DEFAULT now()`, а CHECK orders_paid_at_sane
+   * вимагає `paid_at >= created_at`. Клієнтський `new Date()` обчислюється в
+   * Node, причому з роздільністю мілісекунди проти мікросекунд у `now()`, тож
+   * зрізаний клієнтський час опиняється НИЖЧЕ серверного. Поза транзакцією це
+   * падає на CHECK завжди: 50 вставок із 50, а саме порівняння
+   * `$1::timestamptz < now()` дає true у 200 замірах із 200.
+   *
+   * Чому тест із GROUP BY при цьому «мерехтів», а не падав щоразу: у транзакції
+   * `now()` — це час її ПОЧАТКУ (transaction_timestamp), зафіксований на BEGIN.
+   * Тож усе залежить від того, скільки запитів тест устиг зробити до create():
+   * заміряно 95 порушень зі 100 без жодного запиту, 68 — після двох, 51 — після
+   * пʼяти. Тест із GROUP BY робить до create() рівно пʼять вставок — звідси й
+   * «6 падінь із 13». І звідси ж ілюзія, що на повільній БД усе гаразд: там
+   * кожен попередній запит відсуває клієнтський час далі від BEGIN.
+   *
+   * `now()` у самому SQL прибирає клієнтський годинник узагалі: обидві колонки
+   * отримують один і той самий transaction_timestamp, тож `paid_at = created_at`.
+   * Так само зроблено в транзакційному checkout (src/checkout.ts) — тут цей
+   * інваріант був загублений.
+   *
+   * Рішення «чи взагалі є paid_at» теж живе в SQL: тримати його в двох місцях
+   * (тут і в CHECK orders_paid_has_paid_at) означало б рано чи пізно розійтися.
+   */
+  async create(buyerId: string, status = 'pending'): Promise<CreatedOrderRow> {
+    const { rows } = await this.db.query<CreatedOrderRow>(
       `INSERT INTO orders (buyer_id, status, total_cents, currency, paid_at)
-       VALUES ($1, $2, 0, 'UAH', $3)
-       RETURNING id, buyer_id, status, total_cents, currency`,
-      [buyerId, status, paidAt],
+       VALUES ($1, $2, 0, 'UAH',
+               CASE WHEN $2::text IN ('pending', 'cancelled') THEN NULL ELSE now() END)
+       RETURNING id, buyer_id, status, total_cents, currency, created_at, paid_at`,
+      [buyerId, status],
     );
     return rows[0];
   }
