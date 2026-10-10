@@ -1,5 +1,9 @@
-# Локальний Postgres: стенд для розробки, для перевірки ротації пароля (ДЗ-11)
-# і для дата-шару (ДЗ-12).
+# Локальний стенд: Postgres + PgBouncer перед ним.
+#
+# Застосунок і скрипти ходять у базу через PgBouncer (127.0.0.1:6432), а не
+# напряму в 5432 — рядок підключення у сховищі ДЗ-11 вказує на пулер.
+# Порт 5432 лишається опублікованим свідомо: pg_dump, pg_restore і ротація
+# пароля (ДЗ-11) потребують СЕСІЇ, а не транзакції, тож ходять напряму.
 #
 # Пароль ролі приходить файлом через docker secret, а не через environment:
 # так його не видно ані в `docker inspect`, ані в історії шарів образу.
@@ -35,6 +39,25 @@ services:
       interval: 5s
       timeout: 3s
       retries: 10
+
+  # ── PgBouncer (ДЗ-15) ──────────────────────────────────────────────────────
+  # pool_mode = transaction, конфіг у репозиторії: pgbouncer/pgbouncer.ini.
+  # Порт опублікований, бо і застосунок, і грейдер ходять із хоста, а не з
+  # мережі compose.
+  pgbouncer:
+    image: edoburu/pgbouncer:latest
+    container_name: marketplace-pgbouncer
+    restart: unless-stopped
+    depends_on:
+      db:
+        # Пулер піднімається лише після того, як Postgres почав приймати
+        # зʼєднання: інакше перші клієнти отримали б «server login failed».
+        condition: service_healthy
+    volumes:
+      - ./pgbouncer/pgbouncer.ini:/etc/pgbouncer/pgbouncer.ini:ro
+      - ./pgbouncer/userlist.txt:/etc/pgbouncer/userlist.txt:ro
+    ports:
+      - "6432:6432"
 
 volumes:
   pgdata:

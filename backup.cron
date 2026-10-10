@@ -1,0 +1,21 @@
+# Нічний бекап бази курсового проєкту.
+#
+# Встановити:  crontab backup.cron       (або скопіювати рядок у crontab -e)
+# Перевірити:  crontab -l
+#
+# Рядок підключення береться зі сховища тією самою обгорткою, що й усі інші
+# команди проєкту: у cron немає ані інтерактивного логіна, ані .env — лише
+# креденшели машинної ідентичності в .secrets/infisical.env.
+#
+# ШЛЯХ нижче замінити на свій: cron не має ані cwd, ані PATH проєкту.
+# Поля: хвилина година день місяць день-тижня команда
+#       03:17 щоночі — не рівно о третій, щоб не збігатися з усіма іншими
+#       нічними задачами на машині.
+
+CRON_TZ=Europe/Kyiv
+SHELL=/bin/bash
+
+17 3 * * * cd /ABSOLUTE/PATH/TO/term-project && bash scripts/with-secrets.sh dev bash scripts/backup.sh >> backups/backup.log 2>&1
+
+# Альтернатива для систем, де достатньо скорочення (виконується о 00:00):
+# @daily cd /ABSOLUTE/PATH/TO/term-project && bash scripts/with-secrets.sh dev bash scripts/backup.sh >> backups/backup.log 2>&1

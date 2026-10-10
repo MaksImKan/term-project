@@ -1,0 +1,8 @@
+; Дев-креденшели стенда. Ті самі, що в docker-compose.yml і
+; secrets/db_password.example — секретом не є й потрібні, щоб стек піднімався
+; зі свіжого клону без правок.
+;
+; Пароль тут мусить збігатися з паролем ролі в Postgres: PgBouncer логіниться в
+; базу саме ним. У проді замість цього файла — auth_query (див. README).
+"marketplace" "dev_password_0"
+"pgbouncer_admin" "dev_admin_0"

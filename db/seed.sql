@@ -32,7 +32,11 @@
 -- (created_at потрібен і сам собою, і для paid_at) без повторного random().
 -- =============================================================================
 
-TRUNCATE order_items, orders, products, users RESTART IDENTITY;
+-- CASCADE потрібен через те, що з ДЗ-14 на orders посилається ще й tasks:
+-- без нього TRUNCATE падає з «cannot truncate a table referenced in a foreign
+-- key constraint». CASCADE прибирає й ці рядки, і працює незалежно від того,
+-- існує таблиця tasks у цій схемі чи ні.
+TRUNCATE order_items, orders, products, users RESTART IDENTITY CASCADE;
 
 -- -----------------------------------------------------------------------------
 -- users: 50 000. Імена виводяться з номера рядка (не random!), тому email

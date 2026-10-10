@@ -4,12 +4,14 @@ NestJS + `express-openapi-validator` (ДЗ-09), керована конфігу�
 секретів (ДЗ-11), дата-шар на Postgres з індексами та повнотекстовим пошуком (ДЗ-12)
 TypeORM поверх цієї схеми — entities, міграції, N+1 (ДЗ-13) — і конкурентні
 транзакції: checkout без oversell, воркер-пул на `SKIP LOCKED`, retry (ДЗ-14).
+Операційний шар бази — PgBouncer перед Postgres, нічний бекап і restore-drill (ДЗ-15).
 
 * [Grading](#grading) — блок для грейдера: свіжий клон, чиста БД, без сховища
 * [Configuration](#configuration) — змінні середовища, запуск, ротація пароля БД
 * [Дата-шар](#дата-шар-дз-12) — схема, seed на 100k+, `EXPLAIN` до і після індексів
 * [ORM-шар](#orm-шар-дз-13) — entities, міграції, N+1, Repository проти QueryBuilder
 * [Конкурентність](#конкурентність-дз-14) — транзакційний checkout, SKIP LOCKED, retry
+* [Data layer ops](#data-layer-ops-дз-15) — PgBouncer, бекап, restore-drill
 
 ## Grading
 
@@ -18,7 +20,8 @@ TypeORM поверх цієї схеми — entities, міграції, N+1 (Д
 
 ```bash
 docker compose up -d --wait
-export DATABASE_URL=postgres://marketplace:dev_password_0@127.0.0.1:5432/marketplace
+# 6432 — це PgBouncer (сервіс pgbouncer), а не прямий порт Postgres
+export DATABASE_URL=postgres://marketplace:dev_password_0@127.0.0.1:6432/marketplace
 export SKIP_VAULT=1    # у грейдера немає доступу до сховища
 
 npm ci
@@ -36,7 +39,23 @@ npm run report                    # ДЗ-13: агрегат через QueryBuil
 npm run demo:race                 # ДЗ-14: 50 паралельних checkout, oversell = 0
 npm run demo:workers              # ДЗ-14: воркер-пул на SKIP LOCKED
 npm run demo:retry                # ДЗ-14: serialization failure + повтор
+
+# ДЗ-15: пулер, бекап, restore-drill
+psql -h 127.0.0.1 -p 6432 -U marketplace -d marketplace -c "SELECT 1"
+PGPASSWORD=dev_admin_0 psql -h 127.0.0.1 -p 6432 -U pgbouncer_admin -d pgbouncer -c "SHOW POOLS"
+bash scripts/with-secrets.sh dev bash scripts/backup.sh
+bash scripts/with-secrets.sh dev bash scripts/restore-drill.sh
 ```
+
+Пароль для `psql` вище — `dev_password_0` (той самий, що в `DATABASE_URL`);
+`PGPASSWORD=dev_password_0` або введений у промпті.
+
+`backup.sh` і `restore-drill.sh` читають підключення з `$DATABASE_URL` самі, тому
+під `SKIP_VAULT=1` обгортка просто виконує їх як є — обидві форми запуску
+(`bash scripts/with-secrets.sh dev bash scripts/backup.sh` і голий
+`bash scripts/backup.sh`) дають однаковий результат. `pg_dump` при цьому свідомо
+йде напряму в `:5432`, в обхід пулера, і друкує це в лозі — чому саме так,
+у розділі [Data layer ops](#data-layer-ops-дз-15).
 
 `package.json` лежить у корені репозиторію, тому жодного `cd` перед цими
 командами не потрібно.
@@ -45,7 +64,7 @@ npm run demo:retry                # ДЗ-14: serialization failure + повто�
 розуміє обидві форми:
 
 ```bash
-export DB_HOST=127.0.0.1 DB_PORT=5432 DB_USER=marketplace DB_PASSWORD=dev_password_0 DB_NAME=marketplace
+export DB_HOST=127.0.0.1 DB_PORT=6432 DB_USER=marketplace DB_PASSWORD=dev_password_0 DB_NAME=marketplace
 ```
 
 Креденшели вище — дев-значення стенда з `docker-compose.yml`; вони не секрет і
@@ -114,6 +133,11 @@ docker compose exec -T db psql -U marketplace -d marketplace -Atc \
 | `src/demo-race.ts`              | 50 паралельних checkout-ів: перевірка на oversell               |
 | `src/demo-workers.ts`           | Воркер-пул через `FOR UPDATE SKIP LOCKED`                       |
 | `src/demo-retry.ts`             | Serialization failure «до/після» retry                          |
+| `pgbouncer/*`                   | Конфіг PgBouncer: `pool_mode = transaction`, userlist           |
+| `scripts/backup.sh`             | `pg_dump -Fc` із датою в імені + контрольне значення            |
+| `scripts/restore-drill.sh`      | Відновлення у чистий контейнер, порівняння «до/після»           |
+| `backup.cron`                   | Нічний розклад бекапу                                           |
+| `RESTORE-DRILL.md`              | Протокол drill-у: розмір, час, RTO, RPO                         |
 | `Dockerfile`, `.dockerignore`   | Образ без секретів у шарах                                     |
 | `README.md`                     | Цей файл                                                       |
 
@@ -685,6 +709,148 @@ QueryBuilder (`setLock('pessimistic_write')` + `setOnLocked('skip_locked')`),
 знімок схеми ДЗ-12, а джерелом правди для структури з ДЗ-13 є міграції
 (про це є рядок у розділі [ORM-шар](#orm-шар-дз-13)). Змішувати два шляхи не
 варто: `psql -f db/schema.sql` на базі, де вже відпрацювали міграції, впаде.
+
+## Data layer ops (ДЗ-15)
+
+Два атрибути production-системи поверх дата-шару: пулер зʼєднань перед Postgres
+і бекап, у відновленні якого є впевненість, бо його відновлювали.
+
+| Файл | Призначення |
+| --- | --- |
+| [`pgbouncer/pgbouncer.ini`](pgbouncer/pgbouncer.ini) | конфіг пулера: `pool_mode = transaction`, адмін-консоль |
+| [`pgbouncer/userlist.txt`](pgbouncer/userlist.txt) | дев-креденшели стенда для SCRAM-автентифікації |
+| [`scripts/backup.sh`](scripts/backup.sh) | `pg_dump -Fc` у файл із датою + контрольне значення поруч |
+| [`scripts/restore-drill.sh`](scripts/restore-drill.sh) | відновлення у чистий контейнер і порівняння «до/після» |
+| [`scripts/lib-db.sh`](scripts/lib-db.sh) | розбір `DATABASE_URL`, запуск `psql`/`pg_dump` |
+| [`backup.cron`](backup.cron) | нічний розклад |
+| [`RESTORE-DRILL.md`](RESTORE-DRILL.md) | протокол drill-у: дата, розмір, час, RTO і RPO |
+
+### Підняти і перевірити
+
+```bash
+docker compose up -d --wait
+
+# застосунок ходить сюди — порт 6432 це PgBouncer
+psql -h 127.0.0.1 -p 6432 -U marketplace -d marketplace -c "SELECT 1"
+
+# адмін-консоль пулера
+PGPASSWORD=dev_admin_0 psql -h 127.0.0.1 -p 6432 -U pgbouncer_admin -d pgbouncer -c "SHOW POOLS"
+```
+
+Якщо `docker compose logs pgbouncer` скаржиться на конфіг: образ
+`edoburu/pgbouncer` за документацією читає саме змонтовані
+`/etc/pgbouncer/pgbouncer.ini` і `/etc/pgbouncer/userlist.txt` (так він тут і
+підключений). На випадок зміни поведінки образу достатньо дописати сервісу
+`command: ["/usr/bin/pgbouncer", "/etc/pgbouncer/pgbouncer.ini"]` — тоді
+entrypoint обходиться стороною й запускається рівно наш конфіг.
+
+`SHOW POOLS` показує базу `marketplace` з `pool_mode = transaction`. Рядок
+підключення у сховищі (ДЗ-11) і контракт у `.env.example` вказують на `:6432`;
+прямий `:5432` лишається опублікованим свідомо — для `pg_dump`, `pg_restore` і
+ротації пароля, яким потрібна сесія.
+
+Що це дає, виміряно на цьому стенді: `npm run demo:race` відкриває **55
+клієнтських зʼєднань**, а Postgres під час цього бачить **8 серверних бекендів**
+(`default_pool_size = 8`). Усі 50 паралельних checkout-ів відпрацювали так само
+коректно — 10 успішних, `stock = 0`, `oversell = 0`. Тобто пулер прибрав
+зростання числа бекендів, не змінивши семантики транзакцій.
+
+### Чому transaction mode і що він ламає
+
+`session` (режим за замовчуванням) закріплює серверне зʼєднання за клієнтом на
+весь час його життя. Для застосунку з пулом на 50 зʼєднань це означає 50 бекендів
+у Postgres — тобто пулер не дає нічого, крім зайвого стрибка в мережі. `statement`
+звільняє зʼєднання після кожного вислову й тому взагалі забороняє багатовислівні
+транзакції — наш `checkout` із чотирьох кроків у ньому неможливий.
+`transaction` — єдиний режим, у якому і транзакції цілі, і серверних зʼєднань
+залишається вісім на двісті клієнтів.
+
+Ціна в тому, що між двома транзакціями одного клієнта серверне зʼєднання може
+бути вже іншим. Ламається все, що тримає стан у **сесії**, а не в транзакції:
+
+1. **`SET` рівня сесії.** `SET search_path`, `SET statement_timeout`,
+   `SET TIME ZONE`, зроблені поза транзакцією, зникають: наступна транзакція
+   поїде на інший бекенд. Тихо, без помилки — і це найгірший варіант.
+   Лікується `SET LOCAL` усередині транзакції або параметрами в рядку підключення.
+2. **Named prepared statements.** `PREPARE` на одному бекенді, `EXECUTE` на
+   іншому — `prepared statement "s1" does not exist`. Драйвери, що кешують
+   запити за іменем (JDBC, `asyncpg`), падають одразу. `node-postgres`, на якому
+   стоїть TypeORM, за замовчуванням надсилає **неназвані** запити, тож нас це не
+   чіпає; на випадок зміни драйвера в конфізі стоїть
+   `max_prepared_statements = 200` — PgBouncer ≥ 1.21 відстежує такі запити й
+   перевиконує `PREPARE` на новому зʼєднанні сам.
+3. **`LISTEN` / `NOTIFY`.** Підписка належить сесії. У transaction mode зʼєднання
+   повертається в пул одразу після транзакції, і сповіщення нікуди не приходить.
+   Саме тому черга задач у цьому проєкті зроблена таблицею і
+   `FOR UPDATE SKIP LOCKED` (ДЗ-14), а не на `LISTEN/NOTIFY`.
+4. **Сесійні advisory-локи.** `pg_advisory_lock()` утримується до кінця сесії —
+   тобто до моменту, який клієнт більше не контролює: лок або «втече» на чуже
+   зʼєднання, або не звільниться взагалі. Транзакційний варіант
+   `pg_advisory_xact_lock()` знімається на COMMIT і працює коректно.
+5. **Тимчасові таблиці й курсори `WITH HOLD`.** `CREATE TEMP TABLE` живе в сесії;
+   наступна транзакція її вже не побачить.
+6. **`pg_dump` / `pg_restore`.** `pg_dump` відкриває транзакцію, фіксує їй
+   snapshot і може чіпляти паралельні зʼєднання до того самого snapshot —
+   транзакційний пулер роздасть ці зʼєднання різним бекендам. Тому
+   `scripts/backup.sh` свідомо ходить **напряму** в `:5432`, і друкує це в лозі.
+
+Ще одна взаємодія, вже не з лекції, а з нашим ДЗ-11: ротація пароля БД.
+PgBouncer автентифікує клієнтів за `userlist.txt`, тож після `rotate.sh` пароль у
+базі новий, а пулер знає старий — застосунок через пулер отримає помилку входу.
+Для стенда лікується оновленням `userlist.txt` і `RELOAD` у адмін-консолі; у
+проді правильна відповідь — `auth_query`: пулер питає хеш у самого Postgres і
+статичного файла з паролями не тримає взагалі.
+
+### Бекап
+
+```bash
+bash scripts/with-secrets.sh dev bash scripts/backup.sh
+```
+
+Складає `pg_dump -Fc` у `backups/marketplace_<дата>_<час>.dump` (тека в
+`.gitignore` — дампи це артефакти, не код) і поруч два службові файли:
+
+* `*.checksum` — `count|sum` по `orders` **на момент дампу**. Саме з цим числом
+  порівнює drill: порівнювати з живою базою нечесно, вона вже змінилась.
+* `*.sha256` — цілісність самого архіву.
+
+Скрипт друкує шлях створеного файла, розмір, час і кількість записів TOC
+(`pg_restore --list` читається — доказ валідного `-Fc` архіву), і прибирає копії
+старші за останні `BACKUP_KEEP` (типово 14 — два тижні нічних бекапів).
+
+Рядок підключення береться тільки з оточення (`DATABASE_URL`/`DB_URL`), який
+наповнює обгортка сховища. Пароль може бути відсутній у DSN — тоді скрипт візьме
+його з файла-секрета `secrets/db_password`, тобто з того самого джерела, що й
+застосунок. Призначення — локальна тека; перенесення в S3 заплановане на ДЗ-26,
+і ключі тоді ляжуть у те саме сховище, а не в новий env-файл.
+
+Розклад — у [`backup.cron`](backup.cron): `17 3 * * *`, щоночі о 03:17 (не рівно
+о третій, щоб не збігатися з усіма іншими нічними задачами). Перед встановленням
+замінити шлях до репозиторію: у cron немає ані `cwd`, ані вашого `PATH`.
+
+```bash
+crontab backup.cron && crontab -l
+```
+
+### Відновлення
+
+```bash
+bash scripts/with-secrets.sh dev bash scripts/restore-drill.sh      # друкує MATCH
+```
+
+Скрипт бере найсвіжіший дамп, створює **новий** том і контейнер
+`postgres:16-alpine`, відновлює туди з `--no-owner --no-acl` (ролі `marketplace`
+у чистому контейнері немає), знімає `count|sum` і порівнює з `*.checksum`.
+Прибирає за собою в `trap` — навіть якщо впав посередині, тож повторний запуск
+теж дає `MATCH`: кожен прогін починається з порожнього тому.
+
+Якщо Docker недоступний (CI-раннер без DinD), скрипт робить те саме в
+тимчасовому кластері Postgres, який сам створює через `initdb` і сам зносить.
+Режим він друкує у першому ж рядку, щоб не було сумнівів, що саме перевірено.
+
+Виміряні числа — у [RESTORE-DRILL.md](RESTORE-DRILL.md): на обсязі сіду
+відновлення займає 1,3 с, на 200 тис. замовлень (дамп 12 MB) — 6,8 с; RPO
+нічного розкладу — 24 години, і там же розписано, чим його зменшують.
 
 ## Що в спеці
 
