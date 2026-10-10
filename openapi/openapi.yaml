@@ -218,6 +218,97 @@ paths:
         default:
           $ref: '#/components/responses/InternalError'
 
+  /orders/{orderId}/status:
+    patch:
+      tags: [orders]
+      operationId: updateOrderStatus
+      summary: Змінити статус замовлення
+      description: >-
+        Застосовує новий статус і публікує подію `order.status` у потік цього
+        замовлення — її отримують і WebSocket-клієнти в кімнаті `orders:{orderId}`,
+        і читачі SSE на `/orders/{orderId}/events`. Подія публікується на кожен
+        застосований запит, навіть якщо статус не змінився: `previous_status`
+        робить це видимим споживачу.
+      parameters:
+        - name: orderId
+          in: path
+          required: true
+          description: Ідентифікатор замовлення.
+          schema:
+            type: string
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/UpdateOrderStatus'
+      responses:
+        '200':
+          description: Замовлення з новим статусом.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Order'
+        '400':
+          $ref: '#/components/responses/BadRequest'
+        '404':
+          $ref: '#/components/responses/NotFound'
+        default:
+          $ref: '#/components/responses/InternalError'
+
+  /orders/{orderId}/events:
+    get:
+      tags: [orders]
+      operationId: streamOrderEvents
+      summary: Потік подій замовлення (Server-Sent Events)
+      description: >-
+        Довгоживучий потік `text/event-stream`. Кожна подія має зростальний
+        `id:`, тип `event: order.status` і `data:` з JSON-тілом події.
+        Клієнт, який перепідключається, надсилає заголовок `Last-Event-ID` —
+        сервер віддає з буфера все, що має більший номер, і лише потім переходить
+        у режим реального часу.
+      parameters:
+        - name: orderId
+          in: path
+          required: true
+          description: Ідентифікатор замовлення.
+          schema:
+            type: string
+        - name: Last-Event-ID
+          in: header
+          required: false
+          description: >-
+            Номер останньої отриманої події. Сервер віддасть події з номерами
+            більшими за цей. Стандартний заголовок EventSource.
+          schema:
+            type: integer
+            minimum: 1
+          example: 3
+        - name: lastEventId
+          in: query
+          required: false
+          description: Те саме, що заголовок `Last-Event-ID` — для клієнтів, яким незручно слати заголовки.
+          schema:
+            type: integer
+            minimum: 1
+      responses:
+        '200':
+          description: Потік подій.
+          content:
+            text/event-stream:
+              schema:
+                type: string
+                example: |
+                  retry: 1000
+
+                  id: 4
+                  event: order.status
+                  data: {"id":4,"order_id":"o_1","status":"paid","previous_status":"created","at":"2026-10-10T09:00:00.000Z"}
+        '404':
+          $ref: '#/components/responses/NotFound'
+        default:
+          $ref: '#/components/responses/InternalError'
+
 components:
   responses:
     BadRequest:
@@ -422,6 +513,7 @@ components:
       type: object
       required:
         - id
+        - buyer_id
         - status
         - items
         - total_cents
@@ -431,6 +523,13 @@ components:
         id:
           type: string
           example: o_1
+        buyer_id:
+          type: string
+          description: >-
+            Власник замовлення. Авторизації в API немає свідомо (`security: []`),
+            але WebSocket-кімната мусить комусь належати: саме за цим полем
+            gateway вирішує, пускати сокет у `orders:{orderId}` чи ні.
+          example: u_1
         status:
           type: string
           enum: [created, paid, cancelled]
@@ -449,6 +548,17 @@ components:
           type: string
           format: date-time
           example: '2026-08-29T10:00:00.000Z'
+
+    UpdateOrderStatus:
+      type: object
+      description: Нове значення статусу замовлення.
+      required:
+        - status
+      properties:
+        status:
+          type: string
+          enum: [created, paid, cancelled]
+          example: paid
 
     OrderPage:
       type: object

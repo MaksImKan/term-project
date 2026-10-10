@@ -25,6 +25,16 @@ module.exports = {
   moduleFileExtensions: ['ts', 'js', 'json'],
   // І *.spec.ts, і Nest-конвенція *.e2e-spec.ts.
   testMatch: ['<rootDir>/test/**/*.spec.ts', '<rootDir>/test/**/*-spec.ts'],
+  // Provider-верифікація свідомо ПОЗА `npm test`.
+  //
+  // Вона перевіряє застосунок проти контракту, який створює consumer-тест
+  // (pacts/ у .gitignore — це артефакт), або проти брокера. На свіжому клоні
+  // артефакта ще немає, а порядок файлів у jest не гарантований, тож спільний
+  // прогін був би зеленим або червоним залежно від того, який файл запустився
+  // першим. Верифікація має власний крок конвеєра — `npm run verify:provider`
+  // після `npm run test:contract` (і саме в такому порядку її запускає CI).
+  testPathIgnorePatterns: ['/node_modules/', '<rootDir>/test/contract/.*provider.*'],
+
   // Контейнер піднімається один раз на файл, тому форсований вихід не потрібен:
   // усі пули і застосунки закриваються в afterAll. Якщо jest колись «зависне» —
   // це баг у тестах, і шукати його треба через --detectOpenHandles.

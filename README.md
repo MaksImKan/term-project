@@ -7,6 +7,8 @@ TypeORM поверх цієї схеми — entities, міграції, N+1 (Д
 Операційний шар бази — PgBouncer перед Postgres, нічний бекап і restore-drill (ДЗ-15).
 Тести — integration на testcontainers, E2E через supertest і контрактні тести на Pact
 із гейтом `can-i-deploy` у CI (ДЗ-16).
+Realtime — нотифікації про статус замовлення двома транспортами: WebSocket-кімнати
+з перевіркою власника і SSE з відновленням після обриву (ДЗ-18).
 
 * [Grading](#grading) — блок для грейдера: свіжий клон, чиста БД, без сховища
 * [Configuration](#configuration) — змінні середовища, запуск, ротація пароля БД
@@ -15,6 +17,8 @@ TypeORM поверх цієї схеми — entities, міграції, N+1 (Д
 * [Конкурентність](#конкурентність-дз-14) — транзакційний checkout, SKIP LOCKED, retry
 * [Data layer ops](#data-layer-ops-дз-15) — PgBouncer, бекап, restore-drill
 * [Тестування](#тестування-дз-16) — testcontainers, ізоляція, E2E, Pact і гейт can-i-deploy
+* [Realtime](#realtime-websocket--sse-дз-18) — WS-кімнати з перевіркою власника, SSE з Last-Event-ID
+* [Trade-offs](#trade-offs-websocket-vs-sse) — WebSocket проти SSE і що я лишив би в проді
 
 ## Grading
 
@@ -50,13 +54,23 @@ bash scripts/with-secrets.sh dev bash scripts/backup.sh
 bash scripts/with-secrets.sh dev bash scripts/restore-drill.sh
 
 # ДЗ-16: тести. Базу підіймають самі (testcontainers), сховище їм не потрібне.
-npm run test:integration          # 10 тестів, справжній Postgres
-npm run test:e2e                  # 4 тести, повний застосунок через HTTP
+npm run test:integration          # 12 тестів, справжній Postgres
+npm run test:e2e                  # 8 тестів, повний застосунок через HTTP (+ realtime ДЗ-18)
 npm run test:contract             # 2 тести -> pacts/marketplace-web-marketplace-api.json
 npm run verify:provider           # застосунок проти цього контракту
 
 # ДЗ-16: брокер і гейт can-i-deploy — обидва стани, до тегу prod і після
 npm run pact:gate
+
+# ДЗ-18: realtime. Потрібен піднятий застосунок — npm start в іншому терміналі.
+curl -sN --max-time 2 -D - -o /dev/null http://localhost:3000/orders/o_1/events \
+  | grep -i '^content-type'                 # text/event-stream
+curl -s -X PATCH http://localhost:3000/orders/o_1/status \
+  -H 'Content-Type: application/json' -d '{"status":"paid"}'
+curl -sN --max-time 2 -H 'Last-Event-ID: 3' http://localhost:3000/orders/o_1/events \
+  | grep '^id:' | head -1                   # id > 3 після 4+ змін статусу
+node scripts/realtime-demo.mjs;             echo "exit=$?"   # A=1 B=0
+node scripts/realtime-demo.mjs --same-room; echo "exit=$?"   # A=1 B=1
 ```
 
 `verify:provider` читає контракт, який створює `test:contract` (`pacts/` — у
@@ -882,9 +896,17 @@ npm run verify:provider    # справжній застосунок проти 
 Порядок має значення лише в одному місці: `verify:provider` читає контракт, який
 створює `test:contract`. На свіжому клоні — спочатку `test:contract`.
 
-`npm test` запускає всі файли `test/**/*.spec.ts` одним прогоном; окремі конфіги
-(`jest.integration.config.js` і далі) відрізняються тільки `testRegex`, база —
-спільна в `jest.config.js`. Там же `reporters: ['default']` і `maxWorkers: 1`.
+`npm test` запускає integration, e2e і consumer-контракт одним прогоном; окремі
+конфіги (`jest.integration.config.js` і далі) відрізняються тільки `testRegex`,
+база — спільна в `jest.config.js`. Там же `reporters: ['default']` і
+`maxWorkers: 1`.
+
+Provider-верифікація у спільний прогін свідомо не входить: вона перевіряє
+застосунок проти контракту, який створює consumer-тест, тож на свіжому клоні
+артефакта ще немає, а порядок файлів у jest не гарантований — спільний прогін
+був би зеленим або червоним залежно від того, який файл запустився першим. Це
+окремий крок конвеєра: `npm run test:contract`, потім `npm run verify:provider`
+(саме так їх і викликає джоба `contract` у CI).
 `reporters` задано явно не для краси: Jest 30 сам визначає оточення
 (`detectAgent()`) і під агентом/у CI тихо підміняє репортер на компактний, після
 чого в лозі немає рядків `PASS …` і не видно, що саме пройшло. Явний `default`
@@ -894,8 +916,8 @@ npm run verify:provider    # справжній застосунок проти 
 
 | Рівень | Файли | Чого це коштує | Що ловить |
 | --- | --- | --- | --- |
-| integration | `test/integration/*.spec.ts` (10 тестів) | контейнер Postgres на файл | FK/UNIQUE/CHECK-констрейнти, повнотекстовий пошук на `tsvector`, атомарний `UPDATE … WHERE stock >= …`, `LEFT JOIN + json_agg` і `GROUP BY`-звіт |
-| e2e | `test/e2e/*.e2e-spec.ts` (4 тести) | контейнер + повний Nest-застосунок | happy path `GET /products → POST /orders → GET /orders/{id}` і негативні кейси, де 400 віддає валідатор зі спеки ДЗ-09, а 404 — `problem+json` |
+| integration | `test/integration/*.spec.ts` (12 тестів) | контейнер Postgres на файл | FK/UNIQUE/CHECK-констрейнти, повнотекстовий пошук на `tsvector`, атомарний `UPDATE … WHERE stock >= …`, `LEFT JOIN + json_agg` і `GROUP BY`-звіт |
+| e2e | `test/e2e/*.e2e-spec.ts` (8 тестів) | контейнер + повний Nest-застосунок | happy path `GET /products → POST /orders → GET /orders/{id}`, негативні кейси, де 400 віддає валідатор зі спеки ДЗ-09, а 404 — `problem+json`, плюс realtime ДЗ-18: SSE з `Last-Event-ID` та ізоляція WS-кімнат |
 | contract | `test/contract/*.consumer.spec.ts` (2 тести) | лише mock-сервер pact | форму відповіді, якої чекає фронтенд: `price_cents` цілим, `next_cursor` nullable |
 | provider | `test/contract/*.provider.spec.ts` (1 тест) | контейнер + застосунок + pact-ядро | що застосунок справді віддає те, що записано в контракті |
 
@@ -1084,6 +1106,153 @@ TEST_DATABASE_URL=postgres://marketplace:dev_password_0@127.0.0.1:5432/marketpla
 Тому кожен integration-файл бере собі відому точку відліку — один `TRUNCATE` у
 `beforeAll`, до всіх тестів. Інакше перевірка «знайшовся рівно один товар»
 побачила б чуже. З testcontainers це no-op: контейнер на файл і так чистий.
+
+## Realtime: WebSocket + SSE (ДЗ-18)
+
+Один потік подій, два транспорти. Коли міняється статус замовлення, подія
+`order.status` їде і в WebSocket-кімнату `orders:<id>`, і в SSE-потік
+`GET /orders/<id>/events` — бо обидва підписані на ту саму шину.
+
+```bash
+npm start                      # tsc -> node dist/main.js, порт 3000
+
+# змінити статус (звідси народжується подія)
+curl -s -X PATCH http://localhost:3000/orders/o_1/status \
+  -H 'Content-Type: application/json' -d '{"status":"paid"}'
+
+# читати потік того самого замовлення
+curl -sN http://localhost:3000/orders/o_1/events
+```
+
+У відповіді:
+
+```
+retry: 1000
+
+id: 1
+event: order.status
+data: {"id":1,"at":"2026-10-10T18:02:08.888Z","order_id":"o_1","status":"paid","previous_status":"created"}
+```
+
+`npm start` — це `tsc` і потім `node dist`, а не `tsx`: декоратори Nest
+(`@WebSocketGateway`, `@SubscribeMessage`, інжекція в конструктор) тримаються на
+`emitDecoratorMetadata`, якого `tsx` не емітить. Під `tsx` gateway підніметься
+без помилки й просто не отримає залежностей.
+
+### Хто кому належить
+
+Авторизації в API немає свідомо (`security: []` у спеці ДЗ-09), але кімната
+мусить комусь належати — інакше в `join` нема що перевіряти. Тому в замовлення
+зʼявилося поле `buyer_id`, а клієнт WebSocket передає себе в handshake:
+
+```js
+io('http://localhost:3000', { auth: { userId: 'u_1' } });
+socket.emit('join', { orderId: 'o_1' }, (ack) => console.log(ack));
+// { ok: true, room: 'orders:o_1', lastEventId: 4 }
+```
+
+`join` відмовляє трьома способами, і всі три перевіряє демо нижче:
+
+| Хто | Відповідь |
+| --- | --- |
+| анонім (немає `auth.userId`) | `{ ok: false, error: 'anonymous' }` |
+| чужий (`userId` ≠ `buyer_id`) | `{ ok: false, error: 'forbidden' }` |
+| неіснуюче замовлення | `{ ok: false, error: 'not_found' }` |
+
+Відмова — саме відмова з ack, а не тиха порожня кімната: клієнт має дізнатися,
+що він НЕ підписаний, інакше він вічно чекатиме подій, яких не буде.
+
+На SSE і на `PATCH .../status` цієї перевірки **немає**: обидва ендпоїнти
+читаються й викликаються анонімно, бо саме так їх перевіряють критерії ДЗ
+(`curl` без заголовків). У проді на них вішається той самий guard, що й на
+`join` — місце для нього позначено коментарем у `orders.controller.ts`.
+
+### Last-Event-ID: доганяємо пропущене
+
+Кожна подія має номер, що зростає **в межах замовлення**. Клієнт, який
+перепідключився, повертає останній відомий номер — сервер віддає з буфера те,
+що більше за нього, і лише потім переходить у режим реального часу:
+
+```bash
+curl -sN -H 'Last-Event-ID: 3' http://localhost:3000/orders/o_1/events | grep '^id:'
+# id: 4
+# id: 5
+```
+
+Буфер — останні 100 подій на замовлення, у памʼяті процесу. Запит без
+`Last-Event-ID` віддає весь наявний буфер: для потоку статусів «історія + далі
+наживо» корисніша за «тільки нове», а клієнт, якому історія не потрібна, просто
+надсилає номер.
+
+Перший рядок потоку — `retry: 1000`. Без нього браузер бере власний дефолт у
+кілька секунд, і реконект виглядає як зависання.
+
+### Демо ізоляції кімнат
+
+```bash
+# основний: клієнти в РІЗНИХ кімнатах — B не має чути подію замовлення A
+node scripts/realtime-demo.mjs;             echo "exit=$?"
+# A_RECEIVED=1
+# B_RECEIVED=0
+# exit=0
+
+# контрольний: обидва клієнти в кімнаті замовлення A — B МУСИТЬ почути
+node scripts/realtime-demo.mjs --same-room; echo "exit=$?"
+# A_RECEIVED=1
+# B_RECEIVED=1
+# exit=0
+```
+
+Обидва прогони — один і той самий код: прапорець міняє лише кімнату другого
+клієнта і, звідти ж, очікуване значення. Скрипт, який друкував би константу
+`B_RECEIVED=0`, на контрольному прогоні себе викриє.
+
+Що це справді вимірює, перевірено мутацією: якщо замінити
+`server.to(room).emit(...)` на `server.emit(...)` (слати всім), основний прогін
+одразу стає червоним —
+
+```
+A_RECEIVED=1
+B_RECEIVED=1
+[demo] ПОМИЛКА: ізоляція порушена: B отримав подію чужої кімнати
+exit=1
+```
+
+— а контрольний лишається зеленим. Саме різниця між двома прогонами і є
+доказом; окремо кожен із них нічого не доводить.
+
+Скрипт також друкує `DENIED_ANONYMOUS=1` і `DENIED_FOREIGN=1` — ті самі
+перевірки `join` із таблиці вище, і вони теж впливають на код виходу.
+
+### Два інстанси: що зламається
+
+Кімнати socket.io та буфер подій живуть **у памʼяті процесу**. На двох
+інстансах за балансувальником клієнт, що тримає сокет на інстансі №1, не
+отримає події, яку згенерував інстанс №2 (а `Last-Event-ID` на «чужому»
+інстансі віддасть порожньо, бо там інший буфер) — лікується спільною шиною:
+`@socket.io/redis-adapter` для розсилки між інстансами плюс спільне сховище
+подій (Redis Streams або та сама таблиця `tasks` у Postgres) замість буфера в
+памʼяті. Для одного інстанса все це зайве, тому тут його свідомо немає.
+
+## Trade-offs: WebSocket vs SSE
+
+| Критерій | WebSocket (socket.io) | SSE (`text/event-stream`) |
+| --- | --- | --- |
+| Напрям каналу | Двобічний: клієнт шле `join`, сервер — події. Кімнати й ack безкоштовні | Односторонній, сервер → клієнт. Усе «від клієнта» — окремим HTTP-запитом |
+| Реконект і відновлення | Реконект із коробки, але «що я пропустив» доводиться робити руками (тут — `lastEventId` в ack) | Реконект і `Last-Event-ID` — частина стандарту; `EventSource` надсилає заголовок сам |
+| Вимоги до інфраструктури | Апґрейд протоколу: потрібна підтримка в балансувальнику й проксі, sticky sessions, окремий адаптер на кілька інстансів | Звичайний HTTP-запит: проходить скрізь, де проходить `GET`; треба лише вимкнути буферизацію (`X-Accel-Buffering: no`) |
+| Ціна на подію | Кадр у вже відкритому сокеті — кілька байтів службових даних | Текстовий блок у відкритій відповіді, трохи більше службових байтів; на реконекті — повноцінний HTTP-запит із заголовками |
+| Підтримка в браузері | Бібліотека на клієнті (socket.io-client ≈ 40 КБ) | `new EventSource(url)`, нуль залежностей |
+| Що видно в DevTools | Окрема вкладка WS, кадри треба розгортати | Звичайний запит у Network, тіло читається очима |
+
+Для нотифікацій про статус замовлення в проді я лишив би **SSE**. Потік тут
+односторонній — сервер повідомляє, клієнт не відповідає, — а все, що в
+WebSocket доводиться дописувати (нумерація подій, добір пропущеного після
+обриву), у SSE вже є стандартом і працює без бібліотеки на клієнті. WebSocket
+виправданий там, де клієнт теж постійно шле дані в той самий канал: чат,
+спільне редагування, трейдинг-термінал. Ціна помилки тут асиметрична: зайвий
+WebSocket — це sticky sessions, Redis-адаптер і окрема гілка в конфігурації
+балансувальника заради каналу, яким у зворотний бік ніхто не користується.
 
 ## Що в спеці
 

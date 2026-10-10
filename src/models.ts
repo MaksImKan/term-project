@@ -13,13 +13,23 @@ export interface OrderItem {
   quantity: number;
 }
 
+export type OrderStatus = 'created' | 'paid' | 'cancelled';
+
 export interface Order {
   id: string;
-  status: 'created' | 'paid' | 'cancelled';
+  // Власник замовлення. Авторизації в проєкті немає свідомо (security: [] у
+  // спеці), але WS-кімната мусить комусь належати — інакше немає що перевіряти
+  // в join. Див. src/orders/orders.gateway.ts.
+  buyer_id: string;
+  status: OrderStatus;
   items: OrderItem[];
   total_cents: number; // цілі копійки
   currency: string;
   created_at: string;
+}
+
+export interface UpdateOrderStatusBody {
+  status: OrderStatus;
 }
 
 export interface CreateOrderBody {
