@@ -1,6 +1,7 @@
 import 'reflect-metadata';
 import { DataSource, DataSourceOptions } from 'typeorm';
 import { Order, OrderItem, Product, Task, User } from './entities';
+import { migrations } from './migrations';
 
 /**
  * DataSource для TypeORM CLI (міграції) і для скриптів seed / demo / report.
@@ -41,7 +42,7 @@ const shared = {
   synchronize: false,
   logging: false,
   entities: [User, Product, Order, OrderItem, Task],
-  migrations: [__dirname + '/migrations/*.{js,ts}'],
+  migrations,
 } satisfies Partial<DataSourceOptions>;
 
 export function buildOptions(): DataSourceOptions {

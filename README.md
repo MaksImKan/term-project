@@ -5,6 +5,10 @@ NestJS + `express-openapi-validator` (ДЗ-09), керована конфігу�
 TypeORM поверх цієї схеми — entities, міграції, N+1 (ДЗ-13) — і конкурентні
 транзакції: checkout без oversell, воркер-пул на `SKIP LOCKED`, retry (ДЗ-14).
 Операційний шар бази — PgBouncer перед Postgres, нічний бекап і restore-drill (ДЗ-15).
+Тести — integration на testcontainers, E2E через supertest і контрактні тести на Pact
+із гейтом `can-i-deploy` у CI (ДЗ-16).
+Realtime — нотифікації про статус замовлення двома транспортами: WebSocket-кімнати
+з перевіркою власника і SSE з відновленням після обриву (ДЗ-18).
 
 * [Grading](#grading) — блок для грейдера: свіжий клон, чиста БД, без сховища
 * [Configuration](#configuration) — змінні середовища, запуск, ротація пароля БД
@@ -12,6 +16,9 @@ TypeORM поверх цієї схеми — entities, міграції, N+1 (Д
 * [ORM-шар](#orm-шар-дз-13) — entities, міграції, N+1, Repository проти QueryBuilder
 * [Конкурентність](#конкурентність-дз-14) — транзакційний checkout, SKIP LOCKED, retry
 * [Data layer ops](#data-layer-ops-дз-15) — PgBouncer, бекап, restore-drill
+* [Тестування](#тестування-дз-16) — testcontainers, ізоляція, E2E, Pact і гейт can-i-deploy
+* [Realtime](#realtime-websocket--sse-дз-18) — WS-кімнати з перевіркою власника, SSE з Last-Event-ID
+* [Trade-offs](#trade-offs-websocket-vs-sse) — WebSocket проти SSE і що я лишив би в проді
 
 ## Grading
 
@@ -45,7 +52,30 @@ psql -h 127.0.0.1 -p 6432 -U marketplace -d marketplace -c "SELECT 1"
 PGPASSWORD=dev_admin_0 psql -h 127.0.0.1 -p 6432 -U pgbouncer_admin -d pgbouncer -c "SHOW POOLS"
 bash scripts/with-secrets.sh dev bash scripts/backup.sh
 bash scripts/with-secrets.sh dev bash scripts/restore-drill.sh
+
+# ДЗ-16: тести. Базу підіймають самі (testcontainers), сховище їм не потрібне.
+npm run test:integration          # 12 тестів, справжній Postgres
+npm run test:e2e                  # 8 тестів, повний застосунок через HTTP (+ realtime ДЗ-18)
+npm run test:contract             # 2 тести -> pacts/marketplace-web-marketplace-api.json
+npm run verify:provider           # застосунок проти цього контракту
+
+# ДЗ-16: брокер і гейт can-i-deploy — обидва стани, до тегу prod і після
+npm run pact:gate
+
+# ДЗ-18: realtime. Потрібен піднятий застосунок — npm start в іншому терміналі.
+curl -sN --max-time 2 -D - -o /dev/null http://localhost:3000/orders/o_1/events \
+  | grep -i '^content-type'                 # text/event-stream
+curl -s -X PATCH http://localhost:3000/orders/o_1/status \
+  -H 'Content-Type: application/json' -d '{"status":"paid"}'
+curl -sN --max-time 2 -H 'Last-Event-ID: 3' http://localhost:3000/orders/o_1/events \
+  | grep '^id:' | head -1                   # id > 3 після 4+ змін статусу
+node scripts/realtime-demo.mjs;             echo "exit=$?"   # A=1 B=0
+node scripts/realtime-demo.mjs --same-room; echo "exit=$?"   # A=1 B=1
 ```
+
+`verify:provider` читає контракт, який створює `test:contract` (`pacts/` — у
+`.gitignore`, це згенерований артефакт), тому порядок саме такий. Усе інше
+порядку не має.
 
 Пароль для `psql` вище — `dev_password_0` (той самий, що в `DATABASE_URL`);
 `PGPASSWORD=dev_password_0` або введений у промпті.
@@ -851,6 +881,378 @@ bash scripts/with-secrets.sh dev bash scripts/restore-drill.sh      # друку
 Виміряні числа — у [RESTORE-DRILL.md](RESTORE-DRILL.md): на обсязі сіду
 відновлення займає 1,3 с, на 200 тис. замовлень (дамп 12 MB) — 6,8 с; RPO
 нічного розкладу — 24 години, і там же розписано, чим його зменшують.
+
+## Тестування (ДЗ-16)
+
+Чотири команди — чотири рівні, і жодна з них нічого не мокає:
+
+```bash
+npm run test:integration   # репозиторії проти справжнього Postgres (testcontainers)
+npm run test:e2e           # наскрізний сценарій через HTTP на повному AppModule
+npm run test:contract      # consumer-контракт -> pacts/marketplace-web-marketplace-api.json
+npm run verify:provider    # справжній застосунок проти цього контракту
+```
+
+Порядок має значення лише в одному місці: `verify:provider` читає контракт, який
+створює `test:contract`. На свіжому клоні — спочатку `test:contract`.
+
+`npm test` запускає integration, e2e і consumer-контракт одним прогоном; окремі
+конфіги (`jest.integration.config.js` і далі) відрізняються тільки `testRegex`,
+база — спільна в `jest.config.js`. Там же `reporters: ['default']` і
+`maxWorkers: 1`.
+
+Provider-верифікація у спільний прогін свідомо не входить: вона перевіряє
+застосунок проти контракту, який створює consumer-тест, тож на свіжому клоні
+артефакта ще немає, а порядок файлів у jest не гарантований — спільний прогін
+був би зеленим або червоним залежно від того, який файл запустився першим. Це
+окремий крок конвеєра: `npm run test:contract`, потім `npm run verify:provider`
+(саме так їх і викликає джоба `contract` у CI).
+`reporters` задано явно не для краси: Jest 30 сам визначає оточення
+(`detectAgent()`) і під агентом/у CI тихо підміняє репортер на компактний, після
+чого в лозі немає рядків `PASS …` і не видно, що саме пройшло. Явний `default`
+вимикає цю евристику.
+
+### Що саме перевіряється
+
+| Рівень | Файли | Чого це коштує | Що ловить |
+| --- | --- | --- | --- |
+| integration | `test/integration/*.spec.ts` (12 тестів) | контейнер Postgres на файл | FK/UNIQUE/CHECK-констрейнти, повнотекстовий пошук на `tsvector`, атомарний `UPDATE … WHERE stock >= …`, `LEFT JOIN + json_agg` і `GROUP BY`-звіт |
+| e2e | `test/e2e/*.e2e-spec.ts` (8 тестів) | контейнер + повний Nest-застосунок | happy path `GET /products → POST /orders → GET /orders/{id}`, негативні кейси, де 400 віддає валідатор зі спеки ДЗ-09, а 404 — `problem+json`, плюс realtime ДЗ-18: SSE з `Last-Event-ID` та ізоляція WS-кімнат |
+| contract | `test/contract/*.consumer.spec.ts` (2 тести) | лише mock-сервер pact | форму відповіді, якої чекає фронтенд: `price_cents` цілим, `next_cursor` nullable |
+| provider | `test/contract/*.provider.spec.ts` (1 тест) | контейнер + застосунок + pact-ядро | що застосунок справді віддає те, що записано в контракті |
+
+Integration-тести ходять у БД через `src/repositories/*` — тонкий шар над `pg`,
+який приймає будь-який `Queryable` (пул або окремий клієнт). Ця абстракція
+зʼявилася саме через ізоляцію: щоб тест міг підсунути репозиторію клієнта з
+відкритою транзакцією.
+
+E2E і provider піднімають застосунок через `src/bootstrap.ts` —
+`configureApp(app)` ставить рівно ті самі middleware в тому самому порядку, що й
+`main.ts` (`express.json` → `express-openapi-validator` зі спеки → роути →
+глобальний `problem+json`-фільтр). Без цього винесення тест перевіряв би інший
+застосунок, ніж той, що йде в прод, і «400 від валідатора» в тесті був би
+вигадкою.
+
+База в тестах приходить тим самим шляхом конфігурації, що в проді: URI
+контейнера розбирається на `DB_URL` без пароля і тимчасовий `DB_PASSWORD_FILE`
+(zod-схема ДЗ-11 пароля в DSN не приймає). Тобто e2e заодно перевіряє і
+конфігураційний контракт.
+
+### Ізоляція: ROLLBACK для integration, TRUNCATE для e2e
+
+Це свідомо різні стратегії, бо випадки різні.
+
+**Integration — транзакція + `ROLLBACK`** (`useRollbackTransaction`): кожен тест
+отримує власний клієнт із відкритою транзакцією, після тесту — `ROLLBACK`. База
+не змінюється взагалі, тому порядок тестів не має значення і чистити нічого не
+треба — найдешевший варіант, коли весь тест живе в одному зʼєднанні.
+
+Чого ця стратегія **не** дає — зеленого прогону. Вона прибирає стан, а не
+недетермінізм у самому коді, і тут це вилізло буквально: тест із `GROUP BY`
+падав у 6 прогонах із 13, і `ROLLBACK` був ні до чого. `OrdersRepository.create()`
+ставив `paid_at` клієнтським `new Date()` проти серверного `created_at DEFAULT
+now()`, і CHECK `orders_paid_at_sane` (`paid_at >= created_at`) валив вставку.
+
+Цікаве тут — чому саме «6 із 13», а не всі 13. Поза транзакцією клієнтський час
+менший за серверний завжди (200 замірів із 200, і 50 падінь на CHECK із 50:
+`new Date()` має роздільність мілісекунди проти мікросекунд у `now()`). Але
+всередині транзакції `now()` — це час її **початку**, зафіксований на `BEGIN`,
+тому результат залежить від того, скільки запитів тест устиг зробити до
+`create()`: заміряно 95 порушень зі 100 без жодного запиту, 68 — після двох,
+51 — після пʼяти. Тест із `GROUP BY` робить до `create()` рівно пʼять вставок.
+Звідси ж і враження, що «на повільній БД усе гаразд»: там кожен попередній запит
+відсуває клієнтський час далі від `BEGIN`.
+
+Виправлено там, де й має бути, — у SQL: `paid_at` ставить `now()`, однакове для
+обох колонок, і це закріплено окремим тестом (`paid_at` мусить дорівнювати
+`created_at` точно).
+
+Обмеження, яке теж варто знати: зміни в транзакції невидимі іншим зʼєднанням,
+тому справжню конкурентність (два паралельних checkout) так не напишеш — для неї
+є окремі демо `src/demo-*.ts`, які працюють із закомічених даних.
+
+**E2E — `TRUNCATE … RESTART IDENTITY CASCADE`** перед кожним кейсом: тут
+`ROLLBACK` не працює в принципі, бо застосунок ходить у базу **власним пулом** і
+транзакції тесту просто не бачить. `RESTART IDENTITY` потрібен, щоб id не
+«текли» між кейсами, `CASCADE` — бо на `orders` посилаються `order_items` і
+`tasks`. Платимо за це швидкістю (`TRUNCATE` на кожен кейс) і тим, що e2e не
+можна ганяти паралельно по одній БД — звідси `maxWorkers: 1`.
+
+### Test data builders
+
+`test/support/builders.ts`: `aUser()`, `aProduct()`, `anOrder()` повертають
+валідний обʼєкт із дефолтами й приймають часткове перевизначення. У тесті видно
+лише те, що для нього справді важливо:
+
+```ts
+const productId = await insertProduct(q(), sellerId, aProduct({ priceCents: 100_000 }));
+```
+
+Унікальність (email, `sku`) дає `uniqueSuffix()`, тож білдери не конфліктують між
+собою навіть без очищення БД.
+
+### Контракт і брокер
+
+Контракт описує уявний фронтенд `marketplace-web` проти провайдера
+`marketplace-api`, шляхи взяті зі спеки ДЗ-09 (`/products`, `/products/{id}`).
+Значення задані матчерами, а не константами: контракт має ламатися від зміни
+**форми** відповіді, а не від того, що в базі інший товар.
+
+Provider-верифікація сідає БД через `stateHandlers` — по одному на кожен
+`given(...)` консюмера, з параметрами з контракту (`id`, `name`, `priceCents`),
+тож провайдер не вгадує дані, а отримує їх.
+
+`pacts/` — **у `.gitignore`**: це згенерований артефакт consumer-тесту, а не
+джерело правди. Джерело правди — сам consumer-тест і брокер; тримати машинний
+JSON у git означало б розвʼязувати в ньому конфлікти і рано чи пізно верифікувати
+застарілу копію.
+
+Брокер — сервіс `pact-broker` у `docker-compose.yml` (разом зі службовою БД
+`pact-broker-db`), слухає `127.0.0.1:9292`:
+
+```bash
+npm run pact:broker       # docker compose up -d --wait pact-broker
+open http://127.0.0.1:9292
+```
+
+Перший старт довгий: брокер — Rails-застосунок і накатує власні міграції, тому в
+healthcheck стоїть `start_period: 120s` — щоб `docker compose up -d --wait` не
+впав на таймауті.
+
+Адреса й токен брокера читаються **лише** з `PACT_BROKER_URL` і
+`PACT_BROKER_TOKEN`; у коді їх немає. Локально їх підкладає сховище ДЗ-11
+(`bash scripts/with-secrets.sh dev npm run verify:provider`), у CI — secrets
+GitHub. Локальний стенд авторизації не має, тому `PACT_BROKER_TOKEN` там просто
+відсутній, і ключ у опції верифаєра не додається взагалі (pact-js валідує опції
+за наявністю ключа: `pactBrokerToken: undefined` падає з `TypeError`).
+
+### Гейт can-i-deploy
+
+```bash
+npm run pact:gate         # bash scripts/pact-gate-demo.sh
+```
+
+Скрипт проходить послідовність, яку повторює джоба `contract` у
+`.github/workflows/contract.yml`:
+
+1. `docker compose up -d --wait pact-broker`
+2. публікація контракту: `PUT /pacts/provider/marketplace-api/consumer/marketplace-web/version/<v>`
+3. `npm run verify:provider` із `PACT_BROKER_URL` — результат верифікації їде в брокер (`publishVerificationResult: true`)
+4. `PUT /pacticipants/marketplace-api/versions/<v>/tags/prod` — «у prod стоїть ця версія провайдера»
+5. `GET /can-i-deploy?pacticipant=marketplace-web&version=<v>&to=prod`
+
+Публікація, тег і сам гейт — звичайний HTTP API брокера через `curl`: ні
+`pact-broker` CLI, ні ruby-гемів ставити не треба.
+
+Крок 5 викликається **двічі** — до кроку 4 і після, — і це і є вся суть гейта.
+
+До тегу:
+
+```
+5/5 can-i-deploy ДО тегу prod (очікуємо deployable: null, unknown: 1)
+  summary: {"deployable":null,"reason":"There is no verified pact between version d56ba65-191454 of marketplace-web and the version of each provider currently in prod","success":0,"failed":0,"unknown":1}
+  -> гейт НЕ пускає: у prod немає версії провайдера, з якою порівнювати
+```
+
+Після тегу:
+
+```
+5/5 can-i-deploy ПІСЛЯ тегу prod (очікуємо deployable: true)
+  summary: {"deployable":true,"reason":"All required verification results are published and successful","success":1,"failed":0,"unknown":0}
+  -> гейт пускає: контракт консюмера верифіковано версією провайдера в prod
+```
+
+Різниця одна: `unknown: 1` проти `success: 1`. `deployable: null` — це не «ні, не
+можна», а «не знаю»: у `prod` немає жодної версії провайдера, з верифікацією якої
+можна було б зіставити цей контракт. Гейт має валити деплой і в цьому випадку —
+тому в CI перевірка написана як `deployable !== true`, а не `deployable === false`.
+Формулювання `reason` залежить від версії брокера; значущі саме `deployable`,
+`unknown` і `success`.
+
+Версії в демо — `<короткий sha>-<HHMMSS>`: суфікс потрібен, щоб демо можна було
+ганяти повторно (після першого прогону версія цього коміту вже протегована
+`prod`, і другий запуск показав би одразу зелений гейт). У CI суфікса немає —
+там версія це `github.sha`, по одній на коміт.
+
+### CI
+
+`.github/workflows/contract.yml`, дві джоби:
+
+- `tests` — `tsc --noEmit`, `test:integration`, `test:e2e`. На `ubuntu-latest`
+  Docker уже є, тож testcontainers працює без service-контейнерів.
+- `contract` — кроки 1–5 вище. Крок `can-i-deploy` парсить відповідь і виходить з
+  кодом 1, якщо `summary.deployable !== true`, — джоба падає разом із ним.
+  Контракт і відповідь гейта лишаються артефактом збірки.
+
+Якщо секрету `PACT_BROKER_URL` немає (форк, свіжий репозиторій), джоба підіймає
+брокер зі стенда проєкту й працює автономно.
+
+### Якщо реєстр образів недоступний
+
+`startTestDatabase()` бере `TEST_DATABASE_URL` (або `DATABASE_URL`), якщо він є в
+оточенні, і тоді контейнер не підіймається — тести йдуть у вказану базу. Це
+потрібно для CI із service-контейнером Postgres і для середовищ без доступу до
+реєстрів образів:
+
+```bash
+TEST_DATABASE_URL=postgres://marketplace:dev_password_0@127.0.0.1:5432/marketplace_test \
+  npm run test:integration
+```
+
+У звичайному локальному прогоні змінної немає й працює саме testcontainers.
+
+Один момент, який видно лише в цьому режимі: `npm test` ганяє всі п'ять файлів
+по одній базі, а e2e і provider **комітять** (у них ізоляція через `TRUNCATE`).
+Тому кожен integration-файл бере собі відому точку відліку — один `TRUNCATE` у
+`beforeAll`, до всіх тестів. Інакше перевірка «знайшовся рівно один товар»
+побачила б чуже. З testcontainers це no-op: контейнер на файл і так чистий.
+
+## Realtime: WebSocket + SSE (ДЗ-18)
+
+Один потік подій, два транспорти. Коли міняється статус замовлення, подія
+`order.status` їде і в WebSocket-кімнату `orders:<id>`, і в SSE-потік
+`GET /orders/<id>/events` — бо обидва підписані на ту саму шину.
+
+```bash
+npm start                      # tsc -> node dist/main.js, порт 3000
+
+# змінити статус (звідси народжується подія)
+curl -s -X PATCH http://localhost:3000/orders/o_1/status \
+  -H 'Content-Type: application/json' -d '{"status":"paid"}'
+
+# читати потік того самого замовлення
+curl -sN http://localhost:3000/orders/o_1/events
+```
+
+У відповіді:
+
+```
+retry: 1000
+
+id: 1
+event: order.status
+data: {"id":1,"at":"2026-10-10T18:02:08.888Z","order_id":"o_1","status":"paid","previous_status":"created"}
+```
+
+`npm start` — це `tsc` і потім `node dist`, а не `tsx`: декоратори Nest
+(`@WebSocketGateway`, `@SubscribeMessage`, інжекція в конструктор) тримаються на
+`emitDecoratorMetadata`, якого `tsx` не емітить. Під `tsx` gateway підніметься
+без помилки й просто не отримає залежностей.
+
+### Хто кому належить
+
+Авторизації в API немає свідомо (`security: []` у спеці ДЗ-09), але кімната
+мусить комусь належати — інакше в `join` нема що перевіряти. Тому в замовлення
+зʼявилося поле `buyer_id`, а клієнт WebSocket передає себе в handshake:
+
+```js
+io('http://localhost:3000', { auth: { userId: 'u_1' } });
+socket.emit('join', { orderId: 'o_1' }, (ack) => console.log(ack));
+// { ok: true, room: 'orders:o_1', lastEventId: 4 }
+```
+
+`join` відмовляє трьома способами, і всі три перевіряє демо нижче:
+
+| Хто | Відповідь |
+| --- | --- |
+| анонім (немає `auth.userId`) | `{ ok: false, error: 'anonymous' }` |
+| чужий (`userId` ≠ `buyer_id`) | `{ ok: false, error: 'forbidden' }` |
+| неіснуюче замовлення | `{ ok: false, error: 'not_found' }` |
+
+Відмова — саме відмова з ack, а не тиха порожня кімната: клієнт має дізнатися,
+що він НЕ підписаний, інакше він вічно чекатиме подій, яких не буде.
+
+На SSE і на `PATCH .../status` цієї перевірки **немає**: обидва ендпоїнти
+читаються й викликаються анонімно, бо саме так їх перевіряють критерії ДЗ
+(`curl` без заголовків). У проді на них вішається той самий guard, що й на
+`join` — місце для нього позначено коментарем у `orders.controller.ts`.
+
+### Last-Event-ID: доганяємо пропущене
+
+Кожна подія має номер, що зростає **в межах замовлення**. Клієнт, який
+перепідключився, повертає останній відомий номер — сервер віддає з буфера те,
+що більше за нього, і лише потім переходить у режим реального часу:
+
+```bash
+curl -sN -H 'Last-Event-ID: 3' http://localhost:3000/orders/o_1/events | grep '^id:'
+# id: 4
+# id: 5
+```
+
+Буфер — останні 100 подій на замовлення, у памʼяті процесу. Запит без
+`Last-Event-ID` віддає весь наявний буфер: для потоку статусів «історія + далі
+наживо» корисніша за «тільки нове», а клієнт, якому історія не потрібна, просто
+надсилає номер.
+
+Перший рядок потоку — `retry: 1000`. Без нього браузер бере власний дефолт у
+кілька секунд, і реконект виглядає як зависання.
+
+### Демо ізоляції кімнат
+
+```bash
+# основний: клієнти в РІЗНИХ кімнатах — B не має чути подію замовлення A
+node scripts/realtime-demo.mjs;             echo "exit=$?"
+# A_RECEIVED=1
+# B_RECEIVED=0
+# exit=0
+
+# контрольний: обидва клієнти в кімнаті замовлення A — B МУСИТЬ почути
+node scripts/realtime-demo.mjs --same-room; echo "exit=$?"
+# A_RECEIVED=1
+# B_RECEIVED=1
+# exit=0
+```
+
+Обидва прогони — один і той самий код: прапорець міняє лише кімнату другого
+клієнта і, звідти ж, очікуване значення. Скрипт, який друкував би константу
+`B_RECEIVED=0`, на контрольному прогоні себе викриє.
+
+Що це справді вимірює, перевірено мутацією: якщо замінити
+`server.to(room).emit(...)` на `server.emit(...)` (слати всім), основний прогін
+одразу стає червоним —
+
+```
+A_RECEIVED=1
+B_RECEIVED=1
+[demo] ПОМИЛКА: ізоляція порушена: B отримав подію чужої кімнати
+exit=1
+```
+
+— а контрольний лишається зеленим. Саме різниця між двома прогонами і є
+доказом; окремо кожен із них нічого не доводить.
+
+Скрипт також друкує `DENIED_ANONYMOUS=1` і `DENIED_FOREIGN=1` — ті самі
+перевірки `join` із таблиці вище, і вони теж впливають на код виходу.
+
+### Два інстанси: що зламається
+
+Кімнати socket.io та буфер подій живуть **у памʼяті процесу**. На двох
+інстансах за балансувальником клієнт, що тримає сокет на інстансі №1, не
+отримає події, яку згенерував інстанс №2 (а `Last-Event-ID` на «чужому»
+інстансі віддасть порожньо, бо там інший буфер) — лікується спільною шиною:
+`@socket.io/redis-adapter` для розсилки між інстансами плюс спільне сховище
+подій (Redis Streams або та сама таблиця `tasks` у Postgres) замість буфера в
+памʼяті. Для одного інстанса все це зайве, тому тут його свідомо немає.
+
+## Trade-offs: WebSocket vs SSE
+
+| Критерій | WebSocket (socket.io) | SSE (`text/event-stream`) |
+| --- | --- | --- |
+| Напрям каналу | Двобічний: клієнт шле `join`, сервер — події. Кімнати й ack безкоштовні | Односторонній, сервер → клієнт. Усе «від клієнта» — окремим HTTP-запитом |
+| Реконект і відновлення | Реконект із коробки, але «що я пропустив» доводиться робити руками (тут — `lastEventId` в ack) | Реконект і `Last-Event-ID` — частина стандарту; `EventSource` надсилає заголовок сам |
+| Вимоги до інфраструктури | Апґрейд протоколу: потрібна підтримка в балансувальнику й проксі, sticky sessions, окремий адаптер на кілька інстансів | Звичайний HTTP-запит: проходить скрізь, де проходить `GET`; треба лише вимкнути буферизацію (`X-Accel-Buffering: no`) |
+| Ціна на подію | Кадр у вже відкритому сокеті — кілька байтів службових даних | Текстовий блок у відкритій відповіді, трохи більше службових байтів; на реконекті — повноцінний HTTP-запит із заголовками |
+| Підтримка в браузері | Бібліотека на клієнті (socket.io-client ≈ 40 КБ) | `new EventSource(url)`, нуль залежностей |
+| Що видно в DevTools | Окрема вкладка WS, кадри треба розгортати | Звичайний запит у Network, тіло читається очима |
+
+Для нотифікацій про статус замовлення в проді я лишив би **SSE**. Потік тут
+односторонній — сервер повідомляє, клієнт не відповідає, — а все, що в
+WebSocket доводиться дописувати (нумерація подій, добір пропущеного після
+обриву), у SSE вже є стандартом і працює без бібліотеки на клієнті. WebSocket
+виправданий там, де клієнт теж постійно шле дані в той самий канал: чат,
+спільне редагування, трейдинг-термінал. Ціна помилки тут асиметрична: зайвий
+WebSocket — це sticky sessions, Redis-адаптер і окрема гілка в конфігурації
+балансувальника заради каналу, яким у зворотний бік ніхто не користується.
 
 ## Що в спеці
 

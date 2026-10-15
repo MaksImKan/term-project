@@ -1,0 +1,152 @@
+name: contract
+
+# ДЗ-16: контрактний конвеєр.
+#
+#   test:contract  -> публікація контракту в брокер
+#                  -> provider verification з publishVerificationResult: true
+#                  -> can-i-deploy, який валить джобу, якщо deployable != true
+#
+# Адреса й токен брокера приходять із secrets GitHub і ніде в репозиторії не
+# лежать (та сама дисципліна, що в ДЗ-11). Якщо секрету PACT_BROKER_URL немає
+# (форк, свіжий репозиторій), джоба підіймає брокер зі стенда проєкту
+# docker-compose.yml і працює повністю автономно — зелена без жодних налаштувань.
+
+on:
+  push:
+    branches:
+      - main
+      - 'hw-**'
+  pull_request:
+  workflow_dispatch:
+
+jobs:
+  tests:
+    name: integration + e2e
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+          cache: npm
+
+      - run: npm ci
+
+      - name: Компіляція чиста
+        run: npx tsc --noEmit
+
+      # База підіймається з коду через testcontainers — на ubuntu-latest
+      # Docker уже є, тож ніякого service-контейнера не потрібно.
+      - name: Integration
+        run: npm run test:integration
+
+      - name: E2E
+        run: npm run test:e2e
+
+  contract:
+    name: contract (pact + can-i-deploy)
+    runs-on: ubuntu-latest
+    env:
+      CONSUMER: marketplace-web
+      PROVIDER: marketplace-api
+      PROD_TAG: prod
+      # Одна версія на коміт: і контракт консюмера, і результат верифікації
+      # провайдера живуть у брокері під нею.
+      CONSUMER_VERSION: ${{ github.sha }}
+      PROVIDER_VERSION: ${{ github.sha }}
+      PACT_BROKER_URL: ${{ secrets.PACT_BROKER_URL }}
+      PACT_BROKER_TOKEN: ${{ secrets.PACT_BROKER_TOKEN }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+          cache: npm
+
+      - run: npm ci
+
+      - name: Брокер
+        run: |
+          set -euo pipefail
+          if [ -z "${PACT_BROKER_URL:-}" ]; then
+            echo "secrets.PACT_BROKER_URL не заданий — підіймаємо брокер зі стенда"
+            docker compose up -d --wait pact-broker
+            echo "PACT_BROKER_URL=http://127.0.0.1:9292" >> "$GITHUB_ENV"
+            BROKER=http://127.0.0.1:9292
+          else
+            BROKER="$PACT_BROKER_URL"
+          fi
+          for _ in $(seq 1 60); do
+            curl -fsS "$BROKER/diagnostic/status/heartbeat" >/dev/null 2>&1 && break
+            sleep 2
+          done
+          curl -fsS "$BROKER/diagnostic/status/heartbeat" >/dev/null
+          echo "брокер відповідає: $BROKER"
+
+      # 1. Консюмер описує очікування -> pacts/marketplace-web-marketplace-api.json
+      - name: Consumer contract
+        run: npm run test:contract
+
+      # 2. Публікація контракту. HTTP API брокера, без pact-broker CLI.
+      - name: Публікація контракту
+        run: |
+          set -euo pipefail
+          AUTH=()
+          [ -n "${PACT_BROKER_TOKEN:-}" ] && AUTH=(-H "Authorization: Bearer $PACT_BROKER_TOKEN")
+          curl -sS -f "${AUTH[@]+"${AUTH[@]}"}" -X PUT \
+            -H 'Content-Type: application/json' \
+            --data-binary "@pacts/$CONSUMER-$PROVIDER.json" \
+            "$PACT_BROKER_URL/pacts/provider/$PROVIDER/consumer/$CONSUMER/version/$CONSUMER_VERSION"
+
+      # 3. Справжній застосунок проти контракту. Результат їде в брокер —
+      #    саме з нього потім живе can-i-deploy.
+      - name: Provider verification
+        run: npm run verify:provider
+
+      # 4. Те, що стоїть у prod. У справжньому конвеєрі цей крок іде ПІСЛЯ
+      #    деплою; тут він позначає версію провайдера, проти якої гейт
+      #    перевіряє консюмера (та сама послідовність, що в
+      #    scripts/pact-gate-demo.sh).
+      - name: Тег prod на версію провайдера
+        run: |
+          set -euo pipefail
+          AUTH=()
+          [ -n "${PACT_BROKER_TOKEN:-}" ] && AUTH=(-H "Authorization: Bearer $PACT_BROKER_TOKEN")
+          curl -sS -f "${AUTH[@]+"${AUTH[@]}"}" -X PUT \
+            -H 'Content-Type: application/json' -d '{}' \
+            "$PACT_BROKER_URL/pacticipants/$PROVIDER/versions/$PROVIDER_VERSION/tags/$PROD_TAG"
+
+      # 5. Гейт. Якщо deployable != true — крок падає, і джоба разом із ним.
+      - name: can-i-deploy
+        run: |
+          set -euo pipefail
+          AUTH=()
+          [ -n "${PACT_BROKER_TOKEN:-}" ] && AUTH=(-H "Authorization: Bearer $PACT_BROKER_TOKEN")
+          curl -sS "${AUTH[@]+"${AUTH[@]}"}" -G "$PACT_BROKER_URL/can-i-deploy" \
+            --data-urlencode "pacticipant=$CONSUMER" \
+            --data-urlencode "version=$CONSUMER_VERSION" \
+            --data-urlencode "to=$PROD_TAG" \
+            -o can-i-deploy.json
+          node -e '
+            const json = JSON.parse(require("node:fs").readFileSync("can-i-deploy.json", "utf8"));
+            const s = json.summary ?? {};
+            console.log("summary: " + JSON.stringify(s));
+            if (s.reason) console.log("reason:  " + s.reason);
+            if (s.deployable !== true) {
+              console.error("can-i-deploy: deployable != true — деплой заблоковано");
+              process.exit(1);
+            }
+            console.log("can-i-deploy: deployable = true");
+          '
+
+      - name: Контракт і відповідь гейта як артефакт
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: pacts
+          path: |
+            pacts/
+            can-i-deploy.json
+          if-no-files-found: warn
