@@ -5,3 +5,4 @@ export type { OrderStatus } from './order.entity';
 export { OrderItem } from './order-item.entity';
 export { Task, TASK_STATUSES } from './task.entity';
 export type { TaskStatus } from './task.entity';
+export { PickingTask } from './picking-task.entity';

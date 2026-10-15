@@ -40,6 +40,24 @@ export const envSchema = z.object({
   DB_POOL_MAX: z.coerce.number().int().min(1).max(100).default(10),
   DB_CONNECTION_TIMEOUT_MS: z.coerce.number().int().min(100).max(60_000).default(5_000),
   DB_SSL: zBool('false'),
+  // Адреса брокера (ДЗ-19). Приходить зі сховища тією самою обгорткою, що й
+  // підключення до бази, — нового env-файла для неї не заводимо.
+  //
+  // Тут, на відміну від DB_URL, пароль у DSN дозволений свідомо: AMQP не має
+  // аналога DB_PASSWORD_FILE, а креденшели локального стенда (app:app із
+  // docker-compose.yml) секретом не є. Реальне значення для проду живе у
+  // сховищі ДЗ-11 і в репозиторій не потрапляє.
+  BROKER_URL: z
+    .string()
+    .regex(
+      /^amqps?:\/\/[^\s]+$/,
+      'очікується amqp://<user>:<pass>@<host>:5672 (5672 — AMQP; 15672 — вебморда, не протокол)',
+    )
+    .default('amqp://app:app@127.0.0.1:5672'),
+  // Скільки повідомлень брокер віддає споживачу наперед (ДЗ-19).
+  // Стеля 2000 — жорстке обмеження quorum-черг; 0 (дефолт брокера) означає
+  // «без ліміту» і тут заборонений схемою.
+  BROKER_PREFETCH: z.coerce.number().int().min(1).max(2000).default(10),
   VALIDATE_RESPONSES: zBool('true'),
   DEFAULT_CURRENCY: z.string().length(3, 'код валюти ISO 4217 — рівно 3 символи').default('UAH'),
   DEFAULT_PAGE_LIMIT: z.coerce.number().int().min(1).max(100).default(20),

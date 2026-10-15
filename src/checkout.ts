@@ -1,4 +1,5 @@
 import { DataSource, EntityManager } from 'typeorm';
+import { OrderPlacedEvent, buildOrderPlacedEvent } from './messaging/contracts';
 
 /**
  * Ключова бізнес-операція домену: оформлення замовлення.
@@ -188,13 +189,48 @@ export async function checkoutInTransaction(
   };
 }
 
+/**
+ * Куди checkout розповідає світові, що замовлення оформлено (ДЗ-19).
+ *
+ * Інтерфейс, а не конкретний клас, із однієї практичної причини: демо
+ * конкурентності (demo:race, 50 паралельних checkout-ів) брокера не
+ * потребують і не мають від нього залежати.
+ */
+export interface OrderPlacedPublisher {
+  publish(event: OrderPlacedEvent): Promise<void>;
+}
+
 /** Публічна операція: та сама логіка, обгорнута в одну транзакцію. */
 export async function checkout(
   dataSource: DataSource,
   input: CheckoutInput,
+  publisher?: OrderPlacedPublisher,
 ): Promise<CheckoutResult> {
   // dataSource.transaction() бере ОДНЕ зʼєднання з пулу і тримає його до
   // COMMIT. Якби BEGIN і COMMIT відправлялись через pool.query(), вони могли
   // б поїхати в різні зʼєднання — і транзакції не було б узагалі.
-  return dataSource.transaction((manager) => checkoutInTransaction(manager, input));
+  const result = await dataSource.transaction((manager) =>
+    checkoutInTransaction(manager, input),
+  );
+
+  // Подія публікується ПІСЛЯ COMMIT, і це свідомий вибір із двох поганих:
+  // публікація до коміту розповіла б про замовлення, якого може не стати.
+  // Ціна цього вибору — вікно між COMMIT і publish: процес, що впав саме тут,
+  // лишає замовлення без події. Закриває це вікно не акуратніший порядок
+  // викликів, а outbox — запис події в ТУ САМУ транзакцію й окремий
+  // відправник. Це ДЗ-22; таблиця tasks для цього вже є (ДЗ-14).
+  if (publisher) {
+    await publisher.publish(
+      buildOrderPlacedEvent({
+        orderId: result.orderId,
+        buyerId: input.buyerId,
+        productId: input.productId,
+        quantity: input.quantity,
+        totalCents: result.totalCents,
+        currency: 'UAH',
+      }),
+    );
+  }
+
+  return result;
 }
