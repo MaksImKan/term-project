@@ -4,7 +4,7 @@ import * as path from 'node:path';
 import { PostgreSqlContainer, StartedPostgreSqlContainer } from '@testcontainers/postgresql';
 import { Pool, PoolClient } from 'pg';
 import { DataSource } from 'typeorm';
-import { Order, OrderItem, Product, Task, User } from '../../src/entities';
+import { Order, OrderItem, PickingTask, Product, Task, User } from '../../src/entities';
 import { migrations } from '../../src/migrations';
 
 /**
@@ -74,7 +74,7 @@ export async function applyMigrations(uri: string): Promise<void> {
     url: uri,
     synchronize: false,
     logging: false,
-    entities: [User, Product, Order, OrderItem, Task],
+    entities: [User, Product, Order, OrderItem, Task, PickingTask],
     migrations,
   });
 

@@ -1,6 +1,6 @@
 import 'reflect-metadata';
 import { DataSource, DataSourceOptions } from 'typeorm';
-import { Order, OrderItem, Product, Task, User } from './entities';
+import { Order, OrderItem, PickingTask, Product, Task, User } from './entities';
 import { migrations } from './migrations';
 
 /**
@@ -41,7 +41,7 @@ const shared = {
   // структуру — міграція, яку видно в code review і яку можна відкотити.
   synchronize: false,
   logging: false,
-  entities: [User, Product, Order, OrderItem, Task],
+  entities: [User, Product, Order, OrderItem, Task, PickingTask],
   migrations,
 } satisfies Partial<DataSourceOptions>;
 
