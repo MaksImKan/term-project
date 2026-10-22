@@ -1,6 +1,7 @@
 import { InitialSchema1790103845758 } from './1790103845758-InitialSchema';
 import { ConcurrencyQueue1790370772509 } from './1790370772509-ConcurrencyQueue';
 import { PickingTasks1792700000000 } from './1792700000000-PickingTasks';
+import { OutboxAndIdempotency1793400000000 } from './1793400000000-OutboxAndIdempotency';
 
 /**
  * Список міграцій у порядку застосування — ЯВНО, без glob-а.
@@ -16,4 +17,5 @@ export const migrations = [
   InitialSchema1790103845758,
   ConcurrencyQueue1790370772509,
   PickingTasks1792700000000,
+  OutboxAndIdempotency1793400000000,
 ];

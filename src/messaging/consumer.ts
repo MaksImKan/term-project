@@ -31,6 +31,12 @@ export interface ConsumerOptions {
    */
   afterEffect?: (event: OrderPlacedEvent, stats: ConsumerStats) => Promise<void> | void;
   onDelivery?: (stats: ConsumerStats) => void;
+  /**
+   * Чим саме застосовувати ефект. Типово — ідемпотентність лише за природним
+   * ключем (ДЗ-19). ДЗ-22 підставляє сюди варіант з inbox-таблицею, де
+   * позначка про обробку й ефект комітяться однією транзакцією.
+   */
+  apply?: (event: OrderPlacedEvent) => Promise<'applied' | 'duplicate'>;
 }
 
 export interface RunningConsumer {
@@ -89,7 +95,9 @@ export async function startConsumer(
       }
 
       try {
-        const outcome = await applyPickingTask(options.dataSource, event);
+        const outcome = options.apply
+          ? await options.apply(event)
+          : await applyPickingTask(options.dataSource, event);
         if (outcome === 'applied') stats.applied += 1;
         else stats.skipped += 1;
 
