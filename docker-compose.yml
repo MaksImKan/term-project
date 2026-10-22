@@ -59,6 +59,40 @@ services:
     ports:
       - "6432:6432"
 
+  # ── RabbitMQ (ДЗ-19) ───────────────────────────────────────────────────────
+  # 4.2 — LTS-серія (комерційна підтримка до 30.06.2030). Поточна 4.3
+  # підтримується до 30.04.2028, тож для стенда, який має просто працювати
+  # роками, обрано саме LTS.
+  #
+  # Суфікс -management не косметика: без вебморди на 15672 не подивитися очима
+  # на x-death отруєного повідомлення, і налагодження DLQ перетворюється на
+  # вгадування.
+  #
+  # Класичне дзеркалювання (ha-mode) не налаштовуємо: воно прибране з
+  # RabbitMQ 4.0, а черги цього ДЗ — quorum.
+  rabbitmq:
+    image: rabbitmq:4.2-management
+    container_name: marketplace-rabbitmq
+    restart: unless-stopped
+    environment:
+      RABBITMQ_DEFAULT_USER: app
+      RABBITMQ_DEFAULT_PASS: app
+    ports:
+      - "5672:5672"    # AMQP — сюди ходить код
+      - "15672:15672"  # вебморда менеджменту — сюди ходить людина
+    volumes:
+      - rabbitmqdata:/var/lib/rabbitmq
+    healthcheck:
+      # Саме check_running, а не «порт відкрився»: між тим, як відкриється TCP,
+      # і тим, як Erlang-нода почне приймати basic.publish, є вікно, у якому
+      # клієнт ловить ECONNRESET. `docker compose up -d --wait` без цього
+      # повертає успіх зарано.
+      test: ["CMD", "rabbitmq-diagnostics", "-q", "check_running"]
+      interval: 5s
+      timeout: 10s
+      retries: 20
+      start_period: 60s
+
   # ── Pact Broker (ДЗ-16) ────────────────────────────────────────────────────
   # Місце, де живуть контракти і результати їх верифікації. Саме з цих даних
   # відповідає can-i-deploy: «чи можна випускати цю версію в prod».
@@ -127,6 +161,7 @@ services:
 volumes:
   pgdata:
   pactbrokerdata:
+  rabbitmqdata:
 
 secrets:
   # Джерело — .example, а не сам secrets/db_password: той у .gitignore, і на

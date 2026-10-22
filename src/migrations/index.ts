@@ -1,5 +1,6 @@
 import { InitialSchema1790103845758 } from './1790103845758-InitialSchema';
 import { ConcurrencyQueue1790370772509 } from './1790370772509-ConcurrencyQueue';
+import { PickingTasks1792700000000 } from './1792700000000-PickingTasks';
 
 /**
  * Список міграцій у порядку застосування — ЯВНО, без glob-а.
@@ -11,4 +12,8 @@ import { ConcurrencyQueue1790370772509 } from './1790370772509-ConcurrencyQueue'
  *
  * Додав міграцію через `npm run migration:generate` — допиши її сюди.
  */
-export const migrations = [InitialSchema1790103845758, ConcurrencyQueue1790370772509];
+export const migrations = [
+  InitialSchema1790103845758,
+  ConcurrencyQueue1790370772509,
+  PickingTasks1792700000000,
+];
