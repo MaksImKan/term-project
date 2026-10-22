@@ -6,9 +6,11 @@ import {
 } from '@nestjs/common';
 import { ConfigService } from '@nestjs/config';
 import { Pool, QueryResultRow } from 'pg';
+import { DataSource, DataSourceOptions } from 'typeorm';
 import { readFile } from 'node:fs/promises';
 import * as path from 'node:path';
 import { Env } from '../config/env.schema';
+import { buildOptions } from '../data-source';
 
 /**
  * Пароль БД НЕ живе в env і НЕ читається один раз на старті.
@@ -21,6 +23,15 @@ export class DatabaseService implements OnModuleInit, OnApplicationShutdown {
   private readonly logger = new Logger(DatabaseService.name);
   private readonly pool: Pool;
   private readonly passwordFile: string;
+  /**
+   * TypeORM-зʼєднання для операцій, яким потрібна ТРАНЗАКЦІЯ з кількох
+   * запитів (ДЗ-22: бізнес-рядок + рядок outbox одним COMMIT).
+   *
+   * Створюється ліниво, на перший виклик: застосунок, який ходить лише в
+   * REST ДЗ-09, другого пулу не відкриває взагалі — і тести ДЗ-16/18 не
+   * платять за нього часом старту.
+   */
+  private ormConnection?: Promise<DataSource>;
 
   constructor(private readonly config: ConfigService<Env, true>) {
     const dsn = new URL(this.config.get('DB_URL', { infer: true }));
@@ -78,7 +89,21 @@ export class DatabaseService implements OnModuleInit, OnApplicationShutdown {
     }
   }
 
+  /**
+   * DataSource для транзакційних операцій. `dataSource.transaction()` тримає
+   * ОДНЕ зʼєднання від BEGIN до COMMIT — на відміну від pool.query('BEGIN'),
+   * після якого COMMIT міг би поїхати іншим зʼєднанням, і транзакції не було
+   * б узагалі.
+   */
+  async orm(): Promise<DataSource> {
+    this.ormConnection ??= new DataSource(buildOptions() as DataSourceOptions).initialize();
+    return this.ormConnection;
+  }
+
   async onApplicationShutdown(): Promise<void> {
+    if (this.ormConnection) {
+      await this.ormConnection.then((ds) => ds.destroy()).catch(() => undefined);
+    }
     await this.pool.end().catch(() => undefined);
   }
 

@@ -309,6 +309,70 @@ paths:
         default:
           $ref: '#/components/responses/InternalError'
 
+  /checkout:
+    post:
+      tags: [orders]
+      operationId: placeOrder
+      summary: Оформити замовлення (транзакційно, з outbox)
+      description: >-
+        Критична бізнес-операція домену. Декремент залишку, списання балансу,
+        створення замовлення й запис події `order.placed` у таблицю `outbox`
+        відбуваються ОДНИМ `COMMIT` — спільної транзакції між базою і брокером
+        не існує, тож назовні подію виносить окремий relay-воркер.
+
+        `Idempotency-Key` ідентифікує НАМІР, а не тіло: два однакові запити з
+        тим самим ключем дають одне замовлення, і повтор повертає ту саму
+        відповідь із заголовком `Idempotency-Replay: true`. Ключ зберігається
+        в базі в тій самій транзакції — у памʼяті процесу він не пережив би
+        рестарт і не існував би між репліками.
+
+        Цей ендпоїнт працює з РЕАЛЬНИМИ рядками Postgres, на відміну від
+        `POST /orders`, який лишається in-memory стабом контракту з ДЗ-09.
+      parameters:
+        - name: Idempotency-Key
+          in: header
+          required: true
+          description: >-
+            Унікальний ключ наміру, який генерує клієнт. Той самий ключ із тим
+            самим наміром — те саме замовлення; хеш тіла тут не
+            використовується свідомо, інакше два легітимні однакові замовлення
+            схлопнулись би в одне.
+          schema:
+            type: string
+            minLength: 1
+            maxLength: 255
+          example: checkout-2026-10-22-001
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/PlaceOrderBody'
+      responses:
+        '201':
+          description: Замовлення оформлено (або повернуто вже оформлене за тим самим ключем).
+          headers:
+            Idempotency-Replay:
+              description: Присутній зі значенням `true`, якщо це повтор за вже використаним ключем.
+              schema:
+                type: string
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/PlacedOrder'
+        '400':
+          $ref: '#/components/responses/BadRequest'
+        '404':
+          $ref: '#/components/responses/NotFound'
+        '409':
+          description: Не вистачає товару або коштів.
+          content:
+            application/problem+json:
+              schema:
+                $ref: '#/components/schemas/Problem'
+        default:
+          $ref: '#/components/responses/InternalError'
+
 components:
   responses:
     BadRequest:
@@ -548,6 +612,56 @@ components:
           type: string
           format: date-time
           example: '2026-08-29T10:00:00.000Z'
+
+    PlaceOrderBody:
+      type: object
+      description: Намір оформити замовлення на один товар.
+      required:
+        - buyer_id
+        - product_id
+        - quantity
+      properties:
+        buyer_id:
+          type: string
+          example: '1'
+        product_id:
+          type: string
+          example: '1'
+        quantity:
+          type: integer
+          minimum: 1
+          example: 1
+
+    PlacedOrder:
+      type: object
+      required:
+        - order_id
+        - total_cents
+        - currency
+        - replay
+      properties:
+        order_id:
+          type: string
+          example: '42'
+        total_cents:
+          $ref: '#/components/schemas/Money'
+        currency:
+          type: string
+          example: UAH
+        stock_left:
+          type: integer
+          example: 4
+        balance_left:
+          $ref: '#/components/schemas/Money'
+        replay:
+          type: boolean
+          description: true, якщо запит із цим ключем уже оброблявся.
+          example: false
+        outbox_id:
+          type: string
+          nullable: true
+          description: id рядка в outbox, записаного в тій самій транзакції.
+          example: '17'
 
     UpdateOrderStatus:
       type: object
