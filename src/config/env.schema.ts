@@ -54,6 +54,31 @@ export const envSchema = z.object({
       'очікується amqp://<user>:<pass>@<host>:5672 (5672 — AMQP; 15672 — вебморда, не протокол)',
     )
     .default('amqp://app:app@127.0.0.1:5672'),
+  // ── Redis (ДЗ-23) ─────────────────────────────────────────────────────────
+  // Два інстанси, і це не примха: кешу потрібні maxmemory + allkeys-lru, а
+  // документація BullMQ вимагає протилежного — noeviction, бо черга «cannot
+  // work properly if Redis evicts keys arbitrarily». maxmemory-policy одна на
+  // весь процес, і SELECT 1 її не розводить, тож потрібні саме дві коробки.
+  REDIS_URL: z
+    .string()
+    .regex(/^rediss?:\/\/[^\s]+$/, 'очікується redis://<host>:<port>')
+    .default('redis://127.0.0.1:6390'),
+  // Сюди ж, у чергову коробку, кладемо сесії: у кеш-інстансі allkeys-lru
+  // колись викинув би сесію, і вийшло б розлогінення, якого ніхто не може
+  // відтворити.
+  REDIS_QUEUE_URL: z
+    .string()
+    .regex(/^rediss?:\/\/[^\s]+$/, 'очікується redis://<host>:<port>')
+    .default('redis://127.0.0.1:6391'),
+  // Базовий TTL кеша, секунди. Джитер додається зверху — див. CACHE_TTL_JITTER_S.
+  CACHE_TTL_S: z.coerce.number().int().min(1).max(86_400).default(300),
+  // Розкид джитера, секунди. Без нього ключі, прогріті одним циклом, протухнуть
+  // в одну секунду й дадуть stampede на порожньому місці.
+  CACHE_TTL_JITTER_S: z.coerce.number().int().min(10).max(3_600).default(60),
+  // Ліміт запитів на вікно і довжина вікна в секундах.
+  RATE_LIMIT_MAX: z.coerce.number().int().min(1).max(10_000).default(5),
+  RATE_LIMIT_WINDOW_S: z.coerce.number().int().min(1).max(3_600).default(1),
+
   // Скільки повідомлень брокер віддає споживачу наперед (ДЗ-19).
   // Стеля 2000 — жорстке обмеження quorum-черг; 0 (дефолт брокера) означає
   // «без ліміту» і тут заборонений схемою.
