@@ -59,6 +59,69 @@ services:
     ports:
       - "6432:6432"
 
+  # ── Redis: кеш (ДЗ-23) ─────────────────────────────────────────────────────
+  # maxmemory + allkeys-lru — це і є «конфіг кеша». Стоковий Redis має
+  # maxmemory 0 і noeviction: такий кеш не деградує повільно, він у якийсь
+  # момент починає кидати «OOM command not allowed» на запис, і разом із кешем
+  # падає запит користувача.
+  #
+  # Порти 6390/6391 навмисно не з діапазону лекції (22300-22399): щоб цей стек
+  # і стек лекції можна було ганяти паралельно.
+  redis-cache:
+    image: redis:7.4-alpine
+    container_name: marketplace-redis-cache
+    restart: unless-stopped
+    command:
+      - redis-server
+      - --maxmemory
+      - 256mb
+      - --maxmemory-policy
+      - allkeys-lru
+      - --save
+      - ""
+      - --appendonly
+      - "no"
+    ports:
+      - "6390:6379"
+    healthcheck:
+      test: ["CMD", "redis-cli", "-p", "6379", "ping"]
+      interval: 5s
+      timeout: 3s
+      retries: 10
+
+  # ── Redis: черга і сесії (ДЗ-23) ───────────────────────────────────────────
+  # noeviction — пряма вимога документації BullMQ: черга «cannot work properly
+  # if Redis evicts keys arbitrarily». Якщо підключити BullMQ до кеш-інстанса,
+  # він сам напише в лог «IMPORTANT! Eviction policy is allkeys-lru».
+  #
+  # Сесії теж тут, а не в кеші: allkeys-lru колись викинув би сесію, і вийшло б
+  # розлогінення, якого ніхто не може відтворити. Третю коробку не підіймаємо —
+  # у сесій і черги однакова вимога «нічого не викидати самочинно».
+  #
+  # AOF everysec: втратити чергу задач при рестарті дорожче, ніж платити за
+  # щосекундний fsync.
+  redis-queue:
+    image: redis:7.4-alpine
+    container_name: marketplace-redis-queue
+    restart: unless-stopped
+    command:
+      - redis-server
+      - --maxmemory-policy
+      - noeviction
+      - --appendonly
+      - "yes"
+      - --appendfsync
+      - everysec
+    ports:
+      - "6391:6379"
+    volumes:
+      - redisqueuedata:/data
+    healthcheck:
+      test: ["CMD", "redis-cli", "-p", "6379", "ping"]
+      interval: 5s
+      timeout: 3s
+      retries: 10
+
   # ── RabbitMQ (ДЗ-19) ───────────────────────────────────────────────────────
   # 4.2 — LTS-серія (комерційна підтримка до 30.06.2030). Поточна 4.3
   # підтримується до 30.04.2028, тож для стенда, який має просто працювати
@@ -162,6 +225,7 @@ volumes:
   pgdata:
   pactbrokerdata:
   rabbitmqdata:
+  redisqueuedata:
 
 secrets:
   # Джерело — .example, а не сам secrets/db_password: той у .gitignore, і на
