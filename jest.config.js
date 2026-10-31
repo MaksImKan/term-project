@@ -23,6 +23,10 @@ module.exports = {
   maxWorkers: 1,
   testTimeout: 180000,
   moduleFileExtensions: ['ts', 'js', 'json'],
+  // Одноразові ключі підпису (ДЗ-24) — ДО завантаження модулів тесту:
+  // у схемі конфігурації в них немає дефолтів, бо дефолт для ключа дорівнює
+  // зашитому в код ключу.
+  setupFiles: ['<rootDir>/test/support/jest.setup.ts'],
   // І *.spec.ts, і Nest-конвенція *.e2e-spec.ts.
   testMatch: ['<rootDir>/test/**/*.spec.ts', '<rootDir>/test/**/*-spec.ts'],
   // Provider-верифікація свідомо ПОЗА `npm test`.

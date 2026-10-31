@@ -86,6 +86,38 @@ paths:
         default:
           $ref: '#/components/responses/InternalError'
 
+    post:
+      tags: [products]
+      operationId: createProduct
+      summary: Додати товар у каталог
+      description: >-
+        Ресурс із рольовим доступом: пише лише продавець або адмін. Покупцю з
+        цілком валідним токеном — 403. Рішення приймається з того, що вже є в
+        токені, тож воно й належить гарду.
+      security:
+        - bearerAuth: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/CreateProductBody'
+      responses:
+        '201':
+          description: Товар створено.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/CreatedProduct'
+        '400':
+          $ref: '#/components/responses/BadRequest'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '403':
+          $ref: '#/components/responses/Forbidden'
+        default:
+          $ref: '#/components/responses/InternalError'
+
   /products/{productId}:
     get:
       tags: [products]
@@ -373,10 +405,137 @@ paths:
         default:
           $ref: '#/components/responses/InternalError'
 
+  /auth/login:
+    post:
+      tags: [auth]
+      operationId: login
+      summary: Логін — видача пари токенів
+      description: >-
+        `access` — підписаний ES256 JWT із коротким життям; `refresh` —
+        довгий НЕПРОЗОРИЙ рядок, а не JWT. У базі зберігається не сам refresh,
+        а його HMAC-хеш із «перцем» зі сховища.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/LoginBody'
+      responses:
+        '200':
+          description: Пара токенів.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/TokenPair'
+        '400':
+          $ref: '#/components/responses/BadRequest'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        default:
+          $ref: '#/components/responses/InternalError'
+
+  /auth/refresh:
+    post:
+      tags: [auth]
+      operationId: refreshTokens
+      summary: Ротація refresh-токена
+      description: >-
+        Кожен успішний виклик видає НОВУ пару і вбиває стару. Усі токени одного
+        логіна належать одній сімʼї; предʼявлення вже використаного токена —
+        сигнал компрометації, після якого відкликається вся сімʼя
+        (RFC 9700 §4.14.2).
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/RefreshBody'
+      responses:
+        '200':
+          description: Нова пара токенів.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/TokenPair'
+        '400':
+          $ref: '#/components/responses/BadRequest'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        default:
+          $ref: '#/components/responses/InternalError'
+
+  /auth/logout:
+    post:
+      tags: [auth]
+      operationId: logout
+      summary: Логаут — дві дії
+      description: >-
+        Відкликає сімʼю refresh-токенів І заносить `jti` поточного
+        access-токена в денилист із TTL, що дорівнює залишку його життя. Без
+        другої дії self-contained access жив би до `exp` навіть після виходу.
+      security:
+        - bearerAuth: []
+      responses:
+        '204':
+          description: Сесію завершено.
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        default:
+          $ref: '#/components/responses/InternalError'
+
+  /account/orders/{orderId}:
+    get:
+      tags: [orders]
+      operationId: getOwnOrder
+      summary: Замовлення автентифікованого користувача
+      description: >-
+        Ресурс із власником. Чуже замовлення під валідним токеном дає 403, а
+        не 404: токен дійсний, бракує саме прав. Перевірка власності живе не в
+        гарді, а там, де рядок уже завантажено.
+      security:
+        - bearerAuth: []
+      parameters:
+        - name: orderId
+          in: path
+          required: true
+          schema:
+            type: string
+      responses:
+        '200':
+          description: Замовлення.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/AccountOrder'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '403':
+          $ref: '#/components/responses/Forbidden'
+        '404':
+          $ref: '#/components/responses/NotFound'
+        default:
+          $ref: '#/components/responses/InternalError'
+
 components:
   responses:
     BadRequest:
       description: Некоректний запит (валідація параметрів, заголовків або тіла).
+      content:
+        application/problem+json:
+          schema:
+            $ref: '#/components/schemas/Problem'
+    Unauthorized:
+      description: >-
+        Немає токена, він протух або зіпсований. Клієнт має піти рефрешити
+        токен — саме цим 401 відрізняється від 403.
+      content:
+        application/problem+json:
+          schema:
+            $ref: '#/components/schemas/Problem'
+    Forbidden:
+      description: >-
+        Токен дійсний, але прав на цей ресурс немає. Рефреш тут не допоможе —
+        клієнт має показати помилку, а не зациклюватись на оновленні токена.
       content:
         application/problem+json:
           schema:
@@ -401,6 +560,16 @@ components:
         application/problem+json:
           schema:
             $ref: '#/components/schemas/Problem'
+
+  securitySchemes:
+    bearerAuth:
+      type: http
+      scheme: bearer
+      bearerFormat: JWT
+      description: >-
+        Access-токен, підписаний ES256. Перевіряється з ЯВНИМ allowlist
+        алгоритмів (RFC 8725 §3.1) — інакше зловмисник підсунув би
+        `alg: HS256` і підписав токен публічним ключем як секретом.
 
   schemas:
     Problem:
@@ -662,6 +831,94 @@ components:
           nullable: true
           description: id рядка в outbox, записаного в тій самій транзакції.
           example: '17'
+
+    LoginBody:
+      type: object
+      required: [email, password]
+      properties:
+        email:
+          type: string
+          example: Olena.Shevchenko@example.com
+        password:
+          type: string
+          example: demo-password
+
+    RefreshBody:
+      type: object
+      required: [refresh_token]
+      properties:
+        refresh_token:
+          type: string
+          description: Непрозорий рядок, виданий логіном або попередньою ротацією.
+
+    TokenPair:
+      type: object
+      required: [access_token, refresh_token, token_type, expires_in]
+      properties:
+        access_token:
+          type: string
+          description: Підписаний ES256 JWT.
+        refresh_token:
+          type: string
+          description: Непрозорий рядок; у базі лежить лише його HMAC-хеш.
+        token_type:
+          type: string
+          example: Bearer
+        expires_in:
+          type: integer
+          description: Скільки секунд лишилось жити access-токену.
+          example: 900
+        role:
+          type: string
+          enum: [buyer, seller, admin]
+        user_id:
+          type: string
+
+    AccountOrder:
+      type: object
+      required: [id, buyer_id, status, total_cents, currency]
+      properties:
+        id:
+          type: string
+        buyer_id:
+          type: string
+        status:
+          type: string
+        total_cents:
+          $ref: '#/components/schemas/Money'
+        currency:
+          type: string
+
+    CreateProductBody:
+      type: object
+      required: [name, price_cents]
+      properties:
+        name:
+          type: string
+        description:
+          type: string
+        price_cents:
+          $ref: '#/components/schemas/Money'
+        stock:
+          type: integer
+          minimum: 0
+
+    CreatedProduct:
+      type: object
+      required: [id, name, price_cents, currency]
+      properties:
+        id:
+          type: string
+        seller_id:
+          type: string
+        name:
+          type: string
+        price_cents:
+          $ref: '#/components/schemas/Money'
+        currency:
+          type: string
+        stock:
+          type: integer
 
     UpdateOrderStatus:
       type: object

@@ -6,6 +6,7 @@ import { HealthModule } from './health/health.module';
 import { ProductsModule } from './products/products.module';
 import { OrdersModule } from './orders/orders.module';
 import { CheckoutModule } from './outbox/checkout.module';
+import { AuthModule } from './auth/auth.module';
 
 @Module({
   imports: [
@@ -22,6 +23,7 @@ import { CheckoutModule } from './outbox/checkout.module';
     ProductsModule,
     OrdersModule,
     CheckoutModule,
+    AuthModule,
   ],
 })
 export class AppModule {}
