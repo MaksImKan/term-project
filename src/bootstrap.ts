@@ -29,6 +29,12 @@ export function configureApp(app: NestExpressApplication): NestExpressApplicatio
       apiSpec: path.join(process.cwd(), 'openapi', 'openapi.yaml'),
       validateRequests: true,
       validateResponses: config.get('VALIDATE_RESPONSES', { infer: true }),
+      // Автентифікацію енфорсить ГАРД, а не валідатор зі спеки (ДЗ-24).
+      // `security` в операціях лишається як документація контракту, але
+      // рішення «пускати чи ні» має прийматися в одному місці: валідатор
+      // уміє лише подивитись, чи є заголовок, і його 401 став би попереду
+      // перевірки підпису й денилиста.
+      validateSecurity: false,
     }),
   );
 

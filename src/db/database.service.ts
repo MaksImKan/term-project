@@ -10,7 +10,7 @@ import { DataSource, DataSourceOptions } from 'typeorm';
 import { readFile } from 'node:fs/promises';
 import * as path from 'node:path';
 import { Env } from '../config/env.schema';
-import { buildOptions } from '../data-source';
+import { buildOptions } from './data-source-options';
 
 /**
  * Пароль БД НЕ живе в env і НЕ читається один раз на старті.
